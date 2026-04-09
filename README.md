@@ -67,7 +67,7 @@ The program itself does **not** run `sudo` for you.
 
 ## CI
 
-GitHub Actions workflow at `.github/workflows/build.yml` builds on Ubuntu using SDL2/SDL2_ttf packages.
+GitHub Actions workflow at [`.github/workflows/build.yml`](.github/workflows/build.yml) builds on Ubuntu using SDL2/SDL2_ttf packages. Each successful run uploads **`portcommander-linux-x64`** — open the workflow run → **Artifacts** → download the zip (contains the `portcommander` binary; still needs SDL2/SDL2_ttf and `lsof`/`ps` on the machine you run it on).
 
 ## License
 
