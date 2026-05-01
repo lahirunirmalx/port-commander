@@ -69,7 +69,7 @@ build/psu_gui_toolbar_single       # PSU compact strip, single channel
 ./build/apcommander
 ```
 
-Click a tile or press `1`–`7` to launch a tool. The dashboard hides itself while the chosen tool runs and re-appears when you close it. `Esc` / `Q` on the dashboard exits.
+Click a tile or press `1`–`7` to launch a tool. The dashboard stays visible — you can launch multiple tools (up to 32 in parallel) and even start two of the same tool side by side; each tile shows a green border and `● N running` count for its live children. The dashboard reaps finished children every frame so the counters drop automatically when you close a tool. `Esc` / `Q` exits the dashboard; any still-running tools detach and keep working.
 
 You can also run any tool directly:
 
@@ -129,12 +129,40 @@ GitHub Actions workflow at [`.github/workflows/build.yml`](.github/workflows/bui
 ## Project layout
 
 ```
-src/    portcommander       — lsof parser, /proc detail loader, SDL UI, kill action
-wifi/   wificommander       — nmcli wrapper, QR codec, hotspot UI
-adc/    adc_gui             — 24-bit ADC monitor (imported from dev-psu-gui)
-psu/    psu_gui*            — DC PSU GUIs (imported from dev-modbus/psu-gui)
-dash/   apcommander         — dashboard / launcher
+src/      portcommander       — Linux: lsof parser, /proc detail, SDL UI, kill
+wifi/     wificommander       — Linux: nmcli wrapper, QR codec, hotspot UI
+adc/      adc_gui             — POSIX: 24-bit ADC monitor (imported)
+psu/      psu_gui*            — POSIX: DC PSU GUIs (imported)
+dash/     apcommander         — cross-platform: dashboard / launcher
+compat/   apcompat (static)   — cross-platform spawn/poll/path helpers
 ```
+
+### Platform support
+
+| Tool                      | Linux | macOS  | Windows |
+| ------------------------- | :---: | :---:  | :---:   |
+| `apcommander`             |   ✓   |   ✓¹   |   ✓¹    |
+| `portcommander`           |   ✓   |   ✗²   |   ✗     |
+| `wificommander`           |   ✓   |   ✗³   |   ✗     |
+| `adc_gui`, `psu_gui*`     |   ✓   |   ✓¹   |   ✗⁴    |
+
+¹ Compiles cleanly today; not regularly tested.
+² Uses `/proc` and Linux `lsof` output format.
+³ Wraps `nmcli` (NetworkManager); macOS / Windows use entirely different APIs.
+⁴ `serial_port.c` uses `<termios.h>`; needs a Win32 COM port backend before it can run on Windows.
+
+CMake auto-detects the host and only builds the supported targets. The Windows path in [`compat/compat.c`](compat/compat.c) (CreateProcess / WaitForSingleObject / GetExitCodeProcess) is sketched but uncompiled — porting starts there.
+
+### Standalone vs dashboard
+
+Each tool is a fully independent SDL2 binary with its own `main()` and event loop. Build only the tool you want:
+
+```bash
+cmake --build build --target portcommander          # just that one
+cmake --build build --target apcommander            # dashboard + all sibling tools
+```
+
+The dashboard is purely a launcher (it `compat_spawn`s the chosen binary and polls); it has no dependency on the other tools' source. You can ship a tool without `apcommander` or vice versa.
 
 The `adc/` and `psu/` trees were imported from sibling instrument projects and are kept self-contained — each has its own copy of `serial_port.{c,h}` and a per-tool protocol module. See [`CLAUDE.md`](CLAUDE.md) for the architecture in more depth.
 

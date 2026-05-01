@@ -23,11 +23,28 @@ There is no test suite, no linter config, and no formatter config in the repo. T
 
 ## Architecture
 
-Eight executables built from one CMakeLists.txt:
+Eight executables and one static library, built from one CMakeLists.txt:
 
-- **`apcommander`** (in `dash/`) is the user-facing entry point: a small SDL2 dashboard that resolves its own directory via `/proc/self/exe`, registers tiles for the seven tools, and launches the chosen one via `fork`/`execvp`. It hides its window with `SDL_HideWindow` while the child runs and `SDL_ShowWindow` + `SDL_RaiseWindow` when the child exits. If a tool binary is missing, its tile is rendered with a "(binary not found)" footer and the click is a no-op. Layout is a 4-column grid (`MAX_TILES=12` ceiling for future expansion); window default 1000×580.
-- **`portcommander`** (in `src/`) and **`wificommander`** (in `wifi/`) are the *native* tools: written for this project, share the architectural shape described below, and are the parts of the codebase you should actively edit.
-- **`adc_gui`** (in `adc/`) and the four **`psu_gui*`** binaries (in `psu/`) are *imported* tools: they came in verbatim from the sibling projects `dev-psu-gui` and `dev-modbus/psu-gui`. Treat them as third-party — keep them buildable and runnable, but don't refactor them into the native architecture unless asked. Each has its own copy of `serial_port.{c,h}`; do not deduplicate without explicit instruction (the upstreams may diverge).
+- **`apcompat`** (static lib in `compat/`) is the cross-platform abstraction layer used by the dashboard. It exposes four functions: `compat_app_dir` (wraps `SDL_GetBasePath`), `compat_exe_suffix`, `compat_can_execute`, and the spawn/poll pair `compat_spawn` / `compat_proc_poll` / `compat_proc_free`. POSIX path uses `fork` + `execvp` + non-blocking `waitpid`; the Windows path (sketched, uncompiled) uses `CreateProcessA` + `WaitForSingleObject` + `GetExitCodeProcess`. The POSIX child also closes inherited FDs above stderr before `execvp` so spawned tools don't keep the dashboard's X11 socket / font mmaps alive. **All non-portable code in the dashboard goes through this layer** — adding Windows means filling in the `_WIN32` branches there, not touching `dash/main.c`.
+- **`apcommander`** (in `dash/`) is the user-facing entry point: a small SDL2 dashboard that registers tiles for the seven tools and spawns them via `compat_spawn` (non-blocking). The dashboard stays visible — you can launch multiple tools in parallel (`MAX_CHILDREN=32`), and a green border + `● N running` badge tracks live children per tile. Every frame the loop calls `compat_proc_poll` on each tracked child and reaps the exited ones. On exit, any still-running children are detached (POSIX: parent dies → init reaps; Windows: handles are closed without `TerminateProcess`). If a tool binary is missing, its tile is grayed with a "(binary not found)" footer; missing-state is re-checked on click to close the TOCTOU window. Layout is a 4-column grid (`MAX_TILES=12` ceiling); window default 1000×580.
+- **`portcommander`** (in `src/`) and **`wificommander`** (in `wifi/`) are the *native* tools: written for this project, Linux-only (`lsof`/`/proc`, `nmcli`), share the architectural shape described below, and are the parts of the codebase you should actively edit.
+- **`adc_gui`** (in `adc/`) and the four **`psu_gui*`** binaries (in `psu/`) are *imported* tools: they came in verbatim from the sibling projects `dev-psu-gui` and `dev-modbus/psu-gui`. Treat them as third-party — keep them buildable and runnable, but don't refactor them into the native architecture unless asked. Each has its own copy of `serial_port.{c,h}`; do not deduplicate without explicit instruction (the upstreams may diverge). POSIX-only via `<termios.h>`; a Windows port would need a `serial_port_win32.c` swap.
+
+### Platform gating in CMake
+
+Three CMake-time platform classes:
+
+| class            | tools                                                                | gate                                          |
+| ---------------- | -------------------------------------------------------------------- | --------------------------------------------- |
+| Linux-only       | `portcommander`, `wificommander`                                     | `if(CMAKE_SYSTEM_NAME STREQUAL "Linux")`      |
+| POSIX            | `adc_gui`, `psu_gui`, `psu_gui_single`, `psu_gui_toolbar`, `psu_gui_toolbar_single` | `if(NOT WIN32)`              |
+| cross-platform   | `apcommander`, `apcompat`                                            | always                                        |
+
+`add_dependencies(apcommander …)` at the bottom of CMakeLists.txt only adds whichever targets exist for the host — building `apcommander` produces the dashboard plus every tool the platform supports.
+
+### Standalone capability
+
+Every tool has its own `main()` and SDL window and is built as an independent executable. The dashboard is purely a launcher — there is no shared library between tools, no shared SDL context, no IPC. Building `--target portcommander` produces a single self-contained binary you can ship without `apcommander`. The split layout (one tool per directory, each with its own protocol/UI/main triple) preserves this: do not introduce shared state between tools without an explicit reason.
 
 ### Native tool architecture (`portcommander`, `wificommander`)
 

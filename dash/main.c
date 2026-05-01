@@ -1,32 +1,51 @@
-#define _GNU_SOURCE
+/*
+ * APcommander dashboard.
+ *
+ * Cross-platform launcher for the suite. Lays out tiles for each tool in
+ * a 4-column grid, spawns the chosen binary on click without blocking, and
+ * polls the running children every frame so multiple tools can be open
+ * simultaneously. The dashboard stays visible the whole time and reflects
+ * each tile's running count in a small badge.
+ *
+ * Platform-specific bits (executable directory, spawn/poll, exe suffix)
+ * live in compat/. Adding Windows means filling in the `_WIN32` branches
+ * there and gating the POSIX-only tools at the CMake level.
+ */
+#include "compat.h"
+
 #include <SDL.h>
 #include <SDL_ttf.h>
 
-#include <errno.h>
-#include <libgen.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
+
+#ifndef PATH_MAX
+#  define PATH_MAX 1024
+#endif
 
 static const char *const FONT_CANDIDATES[] = {
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
     "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
+    /* Common Windows path (when porting). */
+    "C:/Windows/Fonts/consola.ttf",
     NULL,
 };
 
 static const SDL_Color COL_BG = { 26, 28, 34, 255 };
 static const SDL_Color COL_CARD = { 48, 50, 62, 255 };
 static const SDL_Color COL_CARD_HOVER = { 60, 86, 124, 255 };
+static const SDL_Color COL_CARD_RUN = { 44, 70, 56, 255 };
 static const SDL_Color COL_TEXT = { 230, 232, 238, 255 };
 static const SDL_Color COL_DIM = { 150, 154, 168, 255 };
 static const SDL_Color COL_ACCENT = { 100, 180, 255, 255 };
+static const SDL_Color COL_GOOD = { 120, 200, 130, 255 };
 static const SDL_Color COL_DANGER = { 200, 90, 90, 255 };
 
 #define MAX_TILES 12
+#define MAX_CHILDREN 32
 #define TILE_W 220
 #define TILE_H 140
 #define TILE_GAP 16
@@ -38,9 +57,20 @@ typedef struct Tile {
     const char *desc;
     char exe_path[PATH_MAX];
     int hover;
-    int missing; /* 1 if exe_path isn't executable */
-    char hotkey; /* '1'..'9' shown in corner; 0 = none */
+    int missing;        /* 1 if exe_path isn't executable */
+    int running_count;  /* number of currently-alive children for this tile */
+    char hotkey;        /* '1'..'9' shown in the corner; 0 = none */
 } Tile;
+
+typedef struct Child {
+    CompatProc *proc;
+    int tile_index;
+} Child;
+
+static Child g_children[MAX_CHILDREN];
+static int g_num_children = 0;
+
+/* ------------------------------------------------------------------------- */
 
 static int pt_in_rect(int mx, int my, SDL_Rect r)
 {
@@ -99,82 +129,14 @@ static void draw_text_centered(SDL_Renderer *r, TTF_Font *font,
     draw_text(r, font, text, x_center - tw / 2, y, fg);
 }
 
-/*
- * Sets out to the directory containing /proc/self/exe, e.g. /home/x/build.
- * Falls back to "." on failure.
- */
-static void self_dir(char *out, size_t outsz)
-{
-    char buf[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    char *d;
-
-    if (n <= 0) {
-        snprintf(out, outsz, ".");
-        return;
-    }
-    buf[n] = '\0';
-    d = dirname(buf); /* mutates buf */
-    snprintf(out, outsz, "%s", d);
-}
-
-/*
- * Forks and execvps the given binary path with no extra args. Hides the
- * dashboard window while the child is running so the user only sees the
- * tool. Returns the child's exit code, or -1 on failure (errmsg set).
- */
-static int run_tool(SDL_Window *win, const char *path, char *errmsg,
-                    size_t errsz)
-{
-    pid_t pid;
-    int status;
-
-    if (errmsg && errsz)
-        errmsg[0] = '\0';
-
-    if (access(path, X_OK) != 0) {
-        if (errmsg)
-            snprintf(errmsg, errsz, "Not executable: %s (%s)", path,
-                     strerror(errno));
-        return -1;
-    }
-
-    SDL_HideWindow(win);
-
-    pid = fork();
-    if (pid < 0) {
-        if (errmsg)
-            snprintf(errmsg, errsz, "fork failed: %s", strerror(errno));
-        SDL_ShowWindow(win);
-        return -1;
-    }
-    if (pid == 0) {
-        char *argv[2] = { (char *)path, NULL };
-        execvp(path, argv);
-        _exit(127);
-    }
-    if (waitpid(pid, &status, 0) < 0) {
-        if (errmsg)
-            snprintf(errmsg, errsz, "waitpid: %s", strerror(errno));
-        SDL_ShowWindow(win);
-        return -1;
-    }
-    SDL_ShowWindow(win);
-    SDL_RaiseWindow(win);
-    if (WIFEXITED(status)) {
-        int code = WEXITSTATUS(status);
-        if (code == 127 && errmsg)
-            snprintf(errmsg, errsz, "Failed to exec %s", path);
-        return code;
-    }
-    return -1;
-}
+/* ------------------------------------------------------------------------- */
 
 static void register_tile(Tile *tiles, int *n, const char *title,
                           const char *desc, const char *dir,
                           const char *exe_name, char hotkey)
 {
     Tile *t;
+    int written;
 
     if (*n >= MAX_TILES)
         return;
@@ -183,8 +145,15 @@ static void register_tile(Tile *tiles, int *n, const char *title,
     t->title = title;
     t->desc = desc;
     t->hotkey = hotkey;
-    snprintf(t->exe_path, sizeof(t->exe_path), "%s/%s", dir, exe_name);
-    t->missing = (access(t->exe_path, X_OK) != 0);
+    written = snprintf(t->exe_path, sizeof(t->exe_path), "%s/%s%s", dir,
+                       exe_name, compat_exe_suffix());
+    if (written < 0 || (size_t)written >= sizeof(t->exe_path)) {
+        /* Truncation would point exe_path at a different file — refuse. */
+        t->exe_path[0] = '\0';
+        t->missing = 1;
+        return;
+    }
+    t->missing = !compat_can_execute(t->exe_path);
 }
 
 static void layout_tiles(int win_w, int win_h, Tile *tiles, int n)
@@ -192,8 +161,6 @@ static void layout_tiles(int win_w, int win_h, Tile *tiles, int n)
     int rows = (n + GRID_COLS - 1) / GRID_COLS;
     int grid_w = GRID_COLS * TILE_W + (GRID_COLS - 1) * TILE_GAP;
     int grid_h = rows * TILE_H + (rows - 1) * TILE_GAP;
-    /* Reserve space for the title/subtitle (~96 px) above and the footer
-     * (~48 px) below so the grid sits in the available middle band. */
     int y_top = 96;
     int y_bot = win_h - 48;
     int avail_h = y_bot - y_top;
@@ -221,19 +188,26 @@ static void draw_tile(SDL_Renderer *r, TTF_Font *font_md, TTF_Font *font_sm,
                       const Tile *t)
 {
     SDL_Color border = t->hover ? COL_ACCENT : COL_DIM;
-    SDL_Color bg = t->hover ? COL_CARD_HOVER : COL_CARD;
+    SDL_Color bg = COL_CARD;
     int cx = t->rect.x + t->rect.w / 2;
     int title_y = t->rect.y + 22;
     int desc_y = title_y + 32;
 
+    if (t->running_count > 0) {
+        bg = COL_CARD_RUN;
+        border = t->hover ? COL_ACCENT : COL_GOOD;
+    } else if (t->hover) {
+        bg = COL_CARD_HOVER;
+    }
+
     draw_rect(r, t->rect, bg);
     draw_rect_outline(r, t->rect, border);
 
-    /* Hotkey badge in the top-right corner */
+    /* Hotkey badge in the top-right corner. */
     if (t->hotkey) {
         char hk[2] = { t->hotkey, 0 };
-        SDL_Rect badge = { t->rect.x + t->rect.w - 22,
-                           t->rect.y + 6, 16, 16 };
+        SDL_Rect badge = { t->rect.x + t->rect.w - 22, t->rect.y + 6, 16, 16 };
+
         draw_rect_outline(r, badge, COL_DIM);
         draw_text_centered(r, font_sm, hk, badge.x + badge.w / 2,
                            badge.y + 1, COL_DIM);
@@ -245,7 +219,139 @@ static void draw_tile(SDL_Renderer *r, TTF_Font *font_md, TTF_Font *font_sm,
     if (t->missing) {
         draw_text_centered(r, font_sm, "(binary not found)", cx,
                            t->rect.y + t->rect.h - 26, COL_DANGER);
+    } else if (t->running_count > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "● %d running", t->running_count);
+        draw_text_centered(r, font_sm, buf, cx, t->rect.y + t->rect.h - 26,
+                           COL_GOOD);
     }
+}
+
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Spawns a tool without blocking. The dashboard window stays visible and
+ * the user can click another tile to launch a second instance. Returns 0
+ * on success, -1 on failure (status_msg set).
+ */
+static int launch_tile(Tile *tiles, int idx, char *status_msg, size_t status_sz)
+{
+    Tile *t = &tiles[idx];
+    CompatProc *p;
+
+    if (status_msg && status_sz)
+        status_msg[0] = '\0';
+    /* Re-check at click time — closes the TOCTOU window if the binary was
+     * removed, swapped, or chmod'd between dashboard startup and now. */
+    t->missing = !compat_can_execute(t->exe_path);
+    if (t->missing) {
+        if (status_msg)
+            snprintf(status_msg, status_sz, "Not found: %s", t->exe_path);
+        return -1;
+    }
+    if (g_num_children >= MAX_CHILDREN) {
+        if (status_msg)
+            snprintf(status_msg, status_sz,
+                     "Already running %d tools — close one first.",
+                     MAX_CHILDREN);
+        return -1;
+    }
+
+    p = compat_spawn(t->exe_path, status_msg, status_sz);
+    if (!p) {
+        /* Spawn failed; mark missing so the tile reflects current state. */
+        t->missing = !compat_can_execute(t->exe_path);
+        return -1;
+    }
+
+    g_children[g_num_children].proc = p;
+    g_children[g_num_children].tile_index = idx;
+    g_num_children++;
+    t->running_count++;
+    return 0;
+}
+
+/*
+ * Reaps any children that have exited since the last call. Updates the
+ * owning tile's running_count. Called every frame.
+ *
+ * A poll error (-1) is treated as terminal: keep one bad handle around
+ * across many frames and on Windows the leaked HANDLE accumulates fast.
+ * Better to drop the entry, free the handle, and surface the count drop.
+ */
+static void reap_children(Tile *tiles, int num_tiles)
+{
+    int i = 0;
+
+    while (i < g_num_children) {
+        int code = 0;
+        int r = compat_proc_poll(g_children[i].proc, &code);
+
+        if (r != 0) { /* exited (1) or errored (-1) */
+            int idx = g_children[i].tile_index;
+
+            if (idx >= 0 && idx < num_tiles && tiles[idx].running_count > 0)
+                tiles[idx].running_count--;
+            compat_proc_free(g_children[i].proc);
+            g_children[i] = g_children[g_num_children - 1];
+            g_num_children--;
+        } else {
+            i++;
+        }
+    }
+}
+
+static int total_running(void)
+{
+    return g_num_children;
+}
+
+/* ------------------------------------------------------------------------- */
+
+static int sdl_setup(SDL_Window **win, SDL_Renderer **r)
+{
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return -1;
+    }
+    *win = SDL_CreateWindow("APcommander", SDL_WINDOWPOS_CENTERED,
+                            SDL_WINDOWPOS_CENTERED, 1000, 580,
+                            SDL_WINDOW_RESIZABLE);
+    if (!*win) {
+        fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
+        SDL_Quit();
+        return -1;
+    }
+    *r = SDL_CreateRenderer(*win, -1, SDL_RENDERER_ACCELERATED);
+    if (!*r) {
+        fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
+        SDL_DestroyWindow(*win);
+        SDL_Quit();
+        return -1;
+    }
+    if (TTF_Init() != 0) {
+        fprintf(stderr, "TTF_Init: %s\n", TTF_GetError());
+        SDL_DestroyRenderer(*r);
+        SDL_DestroyWindow(*win);
+        SDL_Quit();
+        return -1;
+    }
+    return 0;
+}
+
+static const char *find_font(void)
+{
+    int i;
+
+    for (i = 0; FONT_CANDIDATES[i]; i++) {
+        FILE *fp = fopen(FONT_CANDIDATES[i], "rb");
+
+        if (fp) {
+            fclose(fp);
+            return FONT_CANDIDATES[i];
+        }
+    }
+    return NULL;
 }
 
 int main(int argc, char *argv[])
@@ -257,7 +363,7 @@ int main(int argc, char *argv[])
     TTF_Font *font_sm = NULL;
     char dir[PATH_MAX - 64];
     char status[512];
-    const char *font_path = NULL;
+    const char *font_path;
     Tile tiles[MAX_TILES];
     int num_tiles = 0;
     int running = 1;
@@ -266,7 +372,7 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    self_dir(dir, sizeof(dir));
+    compat_app_dir(dir, sizeof(dir));
     status[0] = '\0';
 
     register_tile(tiles, &num_tiles, "Port Commander",
@@ -285,42 +391,13 @@ int main(int argc, char *argv[])
                   "Compact single-channel strip", dir,
                   "psu_gui_toolbar_single", '7');
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
-        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+    if (sdl_setup(&win, &r) != 0)
         return 1;
-    }
-    win = SDL_CreateWindow("APcommander", SDL_WINDOWPOS_CENTERED,
-                           SDL_WINDOWPOS_CENTERED, 1000, 580,
-                           SDL_WINDOW_RESIZABLE);
-    if (!win) {
-        fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
-    r = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
-    if (!r) {
-        fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
-        SDL_DestroyWindow(win);
-        SDL_Quit();
-        return 1;
-    }
-    if (TTF_Init() != 0) {
-        fprintf(stderr, "TTF_Init: %s\n", TTF_GetError());
-        SDL_DestroyRenderer(r);
-        SDL_DestroyWindow(win);
-        SDL_Quit();
-        return 1;
-    }
-    for (i = 0; FONT_CANDIDATES[i]; i++) {
-        FILE *fp = fopen(FONT_CANDIDATES[i], "r");
-        if (fp) {
-            fclose(fp);
-            font_path = FONT_CANDIDATES[i];
-            break;
-        }
-    }
+
+    font_path = find_font();
     if (!font_path) {
-        fprintf(stderr, "No font found. Install fonts-dejavu-core.\n");
+        fprintf(stderr, "No font found. Install fonts-dejavu-core "
+                        "(Debian/Ubuntu) or equivalent.\n");
         TTF_Quit();
         SDL_DestroyRenderer(r);
         SDL_DestroyWindow(win);
@@ -350,6 +427,8 @@ int main(int argc, char *argv[])
         int win_h = 0;
         SDL_Event e;
 
+        reap_children(tiles, num_tiles);
+
         SDL_GetWindowSize(win, &win_w, &win_h);
         layout_tiles(win_w, win_h, tiles, num_tiles);
 
@@ -367,10 +446,9 @@ int main(int argc, char *argv[])
                 }
                 if (k >= SDLK_1 && k <= SDLK_9) {
                     int idx = k - SDLK_1;
-                    if (idx < num_tiles && !tiles[idx].missing) {
-                        (void)run_tool(win, tiles[idx].exe_path, status,
-                                       sizeof(status));
-                    }
+
+                    if (idx < num_tiles)
+                        (void)launch_tile(tiles, idx, status, sizeof(status));
                 }
             } else if (e.type == SDL_MOUSEMOTION) {
                 int j;
@@ -384,10 +462,8 @@ int main(int argc, char *argv[])
                 int j;
 
                 for (j = 0; j < num_tiles; j++) {
-                    if (pt_in_rect(mx, my, tiles[j].rect) &&
-                        !tiles[j].missing) {
-                        (void)run_tool(win, tiles[j].exe_path, status,
-                                       sizeof(status));
+                    if (pt_in_rect(mx, my, tiles[j].rect)) {
+                        (void)launch_tile(tiles, j, status, sizeof(status));
                         break;
                     }
                 }
@@ -408,14 +484,26 @@ int main(int argc, char *argv[])
         if (status[0]) {
             draw_text_centered(r, font_sm, status, win_w / 2, win_h - 44,
                                COL_DANGER);
+        } else if (total_running() > 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%d tool%s running",
+                     total_running(), total_running() == 1 ? "" : "s");
+            draw_text_centered(r, font_sm, buf, win_w / 2, win_h - 44,
+                               COL_GOOD);
         }
         draw_text_centered(r, font_sm,
-                           "Click a tile or press 1–7 to launch.   Esc to quit.",
+                           "Click a tile or press 1-7 to launch.   Esc to quit.",
                            win_w / 2, win_h - 22, COL_DIM);
 
         SDL_RenderPresent(r);
         SDL_Delay(16);
     }
+
+    /* Detach any still-running children — leave them alive so the user can
+     * keep using them after closing the dashboard. */
+    for (i = 0; i < g_num_children; i++)
+        compat_proc_free(g_children[i].proc);
+    g_num_children = 0;
 
     TTF_CloseFont(font_lg);
     TTF_CloseFont(font_md);
