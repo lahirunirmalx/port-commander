@@ -2,7 +2,7 @@
 
 A small suite of **C + SDL2** Linux GUIs for everyday system tasks.
 
-It bundles eight independent binaries — one dashboard plus seven tools:
+It bundles ten independent binaries — one dashboard plus nine tools:
 
 - **`apcommander`** — dashboard launcher (the main entry point).
 - **`portcommander`** — inspect open TCP/UDP sockets and safely kill processes.
@@ -12,6 +12,8 @@ It bundles eight independent binaries — one dashboard plus seven tools:
 - **`psu_gui_single`** — single-channel variant of the full PSU GUI, with a collapsible keypad.
 - **`psu_gui_toolbar`** — minimal compact strip for both channels: large V/A readouts, **OUT** toggle, **SET** popup.
 - **`psu_gui_toolbar_single`** — single-channel toolbar variant.
+- **`dmm_gui`** — bench multimeter: V DC / V AC / A DC / A AC / Ω / Hz with auto-ranging readout, MIN / MAX / AVG stats, HOLD.
+- **`eload_gui`** — DC electronic load: CC / CV / CR / CP modes, master INPUT toggle, V / I / P / R live readouts, OVP / OCP / OPP protection.
 
 The dashboard is a thin launcher: it `fork`/`execvp`s whichever sibling binary you click and hides itself while the child runs. Every tool also runs standalone, so each can be tested in isolation.
 
@@ -48,10 +50,10 @@ cmake -S . -B build
 cmake --build build
 ```
 
-This produces eight binaries side by side in `build/`:
+This produces ten binaries side by side in `build/`:
 
 ```
-build/apcommander                  # dashboard
+build/apcommander                  # dashboard (3×3 tile grid)
 build/portcommander                # network ports
 build/wificommander                # Wi-Fi / hotspot
 build/adc_gui                      # 24-bit ADC monitor
@@ -59,9 +61,11 @@ build/psu_gui                      # PSU full, dual channel
 build/psu_gui_single               # PSU full, single channel
 build/psu_gui_toolbar              # PSU compact strip, dual channel
 build/psu_gui_toolbar_single       # PSU compact strip, single channel
+build/dmm_gui                      # bench multimeter
+build/eload_gui                    # DC electronic load
 ```
 
-`apcommander` looks for the seven tools as siblings via `/proc/self/exe`, so they need to live in the same directory (the build directory satisfies this). Tiles for missing binaries render with a red `(binary not found)` footer and clicks become no-ops.
+`apcommander` looks for the nine tools as siblings via `SDL_GetBasePath()`, so they need to live in the same directory (the build directory satisfies this). Tiles for missing binaries render with a red `(binary not found)` footer and clicks become no-ops.
 
 ## Run
 
@@ -69,7 +73,7 @@ build/psu_gui_toolbar_single       # PSU compact strip, single channel
 ./build/apcommander
 ```
 
-Click a tile or press `1`–`7` to launch a tool. The dashboard stays visible — you can launch multiple tools (up to 32 in parallel) and even start two of the same tool side by side; each tile shows a green border and `● N running` count for its live children. The dashboard reaps finished children every frame so the counters drop automatically when you close a tool. `Esc` / `Q` exits the dashboard; any still-running tools detach and keep working.
+Click a tile or press `1`–`9` to launch a tool. The dashboard is a 3×3 grid and stays visible — you can launch multiple tools (up to 32 in parallel) and even start two of the same tool side by side; each tile shows a green border and `● N running` count for its live children. The dashboard reaps finished children every frame so the counters drop automatically when you close a tool. `Esc` / `Q` exits the dashboard; any still-running tools detach and keep working.
 
 You can also run any tool directly:
 
@@ -115,6 +119,14 @@ The toolbar variants (`psu_gui_toolbar`, `psu_gui_toolbar_single`) are a compact
 
 Both communicate with an ESP32 bridge using a small text protocol (`STATUS <ch>`, `WRITE <ch> <reg> <val>`, `LINK`); see the upstream firmware for details.
 
+### Bench Multimeter (`dmm_gui`)
+
+Six-mode DMM: **V DC**, **V AC**, **A DC**, **A AC**, **Ω**, **Hz**. Big VFD-style readout auto-ranges between µ / m / base / k / M units. Side panel tracks **MIN** / **MAX** / **AVG** with a per-mode reset (changing mode also resets stats). **HOLD** freezes the display; **AUTO** toggles auto-ranging. Hotkeys `1`–`6` select mode, `H` toggles HOLD, `R` resets stats. Demo mode generates plausible values for each mode; pass a serial device path on argv[1] to wire up a real backend later.
+
+### DC Electronic Load (`eload_gui`)
+
+Four modes: **CC** (constant current), **CV** (constant voltage), **CR** (constant resistance), **CP** (constant power). Setpoint is per-mode (so switching modes preserves each mode's last value); use **+ / −** or `↑ / ↓` to nudge, or click the field to type. Master **INPUT ON / OFF** lives in the header. Live **V / I / P / R** readouts in a 2×2 grid. Footer slots cycle through OVP / OCP / OPP presets — when a protection trips, INPUT auto-cuts and the trip reason shows in the footer until cleared (click INPUT to reset). Hotkeys `1`–`4` select mode, `Space` toggles INPUT, `↑ / ↓` adjust the active setpoint. Demo mode models a 12 V / 0.05 Ω source.
+
 ## Permissions
 
 Neither tool escalates privileges on its own.
@@ -133,18 +145,22 @@ src/      portcommander       — Linux: lsof parser, /proc detail, SDL UI, kill
 wifi/     wificommander       — Linux: nmcli wrapper, QR codec, hotspot UI
 adc/      adc_gui             — POSIX: 24-bit ADC monitor (imported)
 psu/      psu_gui*            — POSIX: DC PSU GUIs (imported)
+dmm/      dmm_gui             — POSIX: bench multimeter (native)
+eload/    eload_gui           — POSIX: DC electronic load (native)
 dash/     apcommander         — cross-platform: dashboard / launcher
 compat/   apcompat (static)   — cross-platform spawn/poll/path helpers
+common/   vfd.h               — header-only 5×7 dot-matrix VFD digit renderer
 ```
 
 ### Platform support
 
-| Tool                      | Linux | macOS  | Windows |
-| ------------------------- | :---: | :---:  | :---:   |
-| `apcommander`             |   ✓   |   ✓¹   |   ✓¹    |
-| `portcommander`           |   ✓   |   ✗²   |   ✗     |
-| `wificommander`           |   ✓   |   ✗³   |   ✗     |
-| `adc_gui`, `psu_gui*`     |   ✓   |   ✓¹   |   ✗⁴    |
+| Tool                          | Linux | macOS  | Windows |
+| ----------------------------- | :---: | :---:  | :---:   |
+| `apcommander`                 |   ✓   |   ✓¹   |   ✓¹    |
+| `portcommander`               |   ✓   |   ✗²   |   ✗     |
+| `wificommander`               |   ✓   |   ✗³   |   ✗     |
+| `adc_gui`, `psu_gui*`         |   ✓   |   ✓¹   |   ✗⁴    |
+| `dmm_gui`, `eload_gui`        |   ✓   |   ✓¹   |   ✗⁴    |
 
 ¹ Compiles cleanly today; not regularly tested.
 ² Uses `/proc` and Linux `lsof` output format.

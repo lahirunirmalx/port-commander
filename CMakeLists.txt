@@ -119,7 +119,12 @@ endif()
 if(BUILD_POSIX_TOOLS)
     find_package(Threads REQUIRED)
 
-    set(INSTRUMENT_DEFS _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+    # Imported PSU code uses usleep() but doesn't #define _DEFAULT_SOURCE
+    # itself, so add it here. Imported ADC code DOES #define it in the
+    # source — adding it via CMake there would warn about redefinition,
+    # so PSU targets get a separate macro list (INSTRUMENT_DEFS_USLEEP).
+    set(INSTRUMENT_DEFS _POSIX_C_SOURCE=200809L)
+    set(INSTRUMENT_DEFS_USLEEP _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
     set(INSTRUMENT_OPTS ${SDL2_CFLAGS_OTHER} ${SDL2_TTF_CFLAGS_OTHER}
                         -Wno-unused-parameter -Wno-unused-variable
                         -Wno-unused-but-set-variable -Wno-unused-function
@@ -153,7 +158,7 @@ if(BUILD_POSIX_TOOLS)
         ${SDL2_INCLUDE_DIRS}
         ${SDL2_TTF_INCLUDE_DIRS}
     )
-    target_compile_definitions(psu_gui PRIVATE ${INSTRUMENT_DEFS})
+    target_compile_definitions(psu_gui PRIVATE ${INSTRUMENT_DEFS_USLEEP})
     target_compile_options(psu_gui PRIVATE ${INSTRUMENT_OPTS})
     target_link_libraries(psu_gui PRIVATE ${INSTRUMENT_LIBS})
 
@@ -169,7 +174,7 @@ if(BUILD_POSIX_TOOLS)
         ${SDL2_INCLUDE_DIRS}
         ${SDL2_TTF_INCLUDE_DIRS}
     )
-    target_compile_definitions(psu_gui_single PRIVATE ${INSTRUMENT_DEFS})
+    target_compile_definitions(psu_gui_single PRIVATE ${INSTRUMENT_DEFS_USLEEP})
     target_compile_options(psu_gui_single PRIVATE ${INSTRUMENT_OPTS})
     target_link_libraries(psu_gui_single PRIVATE ${INSTRUMENT_LIBS})
 
@@ -184,7 +189,7 @@ if(BUILD_POSIX_TOOLS)
         ${SDL2_INCLUDE_DIRS}
         ${SDL2_TTF_INCLUDE_DIRS}
     )
-    target_compile_definitions(psu_gui_toolbar PRIVATE ${INSTRUMENT_DEFS})
+    target_compile_definitions(psu_gui_toolbar PRIVATE ${INSTRUMENT_DEFS_USLEEP})
     target_compile_options(psu_gui_toolbar PRIVATE ${INSTRUMENT_OPTS})
     target_link_libraries(psu_gui_toolbar PRIVATE ${INSTRUMENT_LIBS})
 
@@ -199,9 +204,39 @@ if(BUILD_POSIX_TOOLS)
         ${SDL2_INCLUDE_DIRS}
         ${SDL2_TTF_INCLUDE_DIRS}
     )
-    target_compile_definitions(psu_gui_toolbar_single PRIVATE ${INSTRUMENT_DEFS})
+    target_compile_definitions(psu_gui_toolbar_single PRIVATE ${INSTRUMENT_DEFS_USLEEP})
     target_compile_options(psu_gui_toolbar_single PRIVATE ${INSTRUMENT_OPTS})
     target_link_libraries(psu_gui_toolbar_single PRIVATE ${INSTRUMENT_LIBS})
+
+    # Bench multimeter (DMM). Native to this project (not imported).
+    add_executable(dmm_gui
+        dmm/main.c
+    )
+    target_include_directories(dmm_gui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/common
+        ${SDL2_INCLUDE_DIRS}
+        ${SDL2_TTF_INCLUDE_DIRS}
+    )
+    target_compile_definitions(dmm_gui PRIVATE ${INSTRUMENT_DEFS})
+    target_compile_options(dmm_gui PRIVATE
+        ${SDL2_CFLAGS_OTHER} ${SDL2_TTF_CFLAGS_OTHER})
+    target_link_libraries(dmm_gui PRIVATE
+        ${SDL2_LIBRARIES} ${SDL2_TTF_LIBRARIES} m)
+
+    # DC electronic load. Native to this project (not imported).
+    add_executable(eload_gui
+        eload/main.c
+    )
+    target_include_directories(eload_gui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/common
+        ${SDL2_INCLUDE_DIRS}
+        ${SDL2_TTF_INCLUDE_DIRS}
+    )
+    target_compile_definitions(eload_gui PRIVATE ${INSTRUMENT_DEFS})
+    target_compile_options(eload_gui PRIVATE
+        ${SDL2_CFLAGS_OTHER} ${SDL2_TTF_CFLAGS_OTHER})
+    target_link_libraries(eload_gui PRIVATE
+        ${SDL2_LIBRARIES} ${SDL2_TTF_LIBRARIES} m)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -211,7 +246,7 @@ endif()
 # -----------------------------------------------------------------------------
 set(_APC_TOOLS "")
 foreach(_t portcommander wificommander adc_gui psu_gui psu_gui_single
-           psu_gui_toolbar psu_gui_toolbar_single)
+           psu_gui_toolbar psu_gui_toolbar_single dmm_gui eload_gui)
     if(TARGET ${_t})
         list(APPEND _APC_TOOLS ${_t})
     endif()

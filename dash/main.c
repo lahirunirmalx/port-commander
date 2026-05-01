@@ -49,7 +49,7 @@ static const SDL_Color COL_DANGER = { 200, 90, 90, 255 };
 #define TILE_W 220
 #define TILE_H 140
 #define TILE_GAP 16
-#define GRID_COLS 4
+#define GRID_COLS 3
 
 typedef struct Tile {
     SDL_Rect rect;
@@ -315,7 +315,7 @@ static int sdl_setup(SDL_Window **win, SDL_Renderer **r)
         return -1;
     }
     *win = SDL_CreateWindow("APcommander", SDL_WINDOWPOS_CENTERED,
-                            SDL_WINDOWPOS_CENTERED, 1000, 580,
+                            SDL_WINDOWPOS_CENTERED, 760, 660,
                             SDL_WINDOW_RESIZABLE);
     if (!*win) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
@@ -390,6 +390,10 @@ int main(int argc, char *argv[])
     register_tile(tiles, &num_tiles, "PSU Toolbar Single",
                   "Compact single-channel strip", dir,
                   "psu_gui_toolbar_single", '7');
+    register_tile(tiles, &num_tiles, "Bench Multimeter",
+                  "DMM: V / A / Ω / Hz / Cap", dir, "dmm_gui", '8');
+    register_tile(tiles, &num_tiles, "DC Electronic Load",
+                  "CC / CV / CR / CP modes", dir, "eload_gui", '9');
 
     if (sdl_setup(&win, &r) != 0)
         return 1;
@@ -492,7 +496,7 @@ int main(int argc, char *argv[])
                                COL_GOOD);
         }
         draw_text_centered(r, font_sm,
-                           "Click a tile or press 1-7 to launch.   Esc to quit.",
+                           "Click a tile or press 1-9 to launch.   Esc to quit.",
                            win_w / 2, win_h - 22, COL_DIM);
 
         SDL_RenderPresent(r);
