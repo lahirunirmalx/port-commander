@@ -7,23 +7,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/apcommander       # main dashboard — click a tile to launch a tool
-./build/portcommander     # standalone: network-port inspector
-./build/wificommander     # standalone: nmcli Wi-Fi / hotspot GUI
+./build/apcommander                    # dashboard — click a tile to launch a tool
+./build/portcommander                  # standalone: network-port inspector
+./build/wificommander                  # standalone: nmcli Wi-Fi / hotspot GUI
+./build/adc_gui                        # standalone: 24-bit ADC monitor
+./build/psu_gui                        # standalone: dual-channel PSU full GUI
+./build/psu_gui_single                 # standalone: single-channel PSU full GUI
+./build/psu_gui_toolbar                # standalone: dual-channel PSU compact strip
+./build/psu_gui_toolbar_single         # standalone: single-channel PSU compact strip
 ```
 
-System dependencies (Debian/Ubuntu): `build-essential cmake pkg-config libsdl2-dev libsdl2-ttf-dev lsof procps fonts-dejavu-core`. `wificommander` additionally requires `network-manager` (`nmcli`) at runtime, and `qrencode` to display the join-QR (silently degrades when missing).
+System dependencies (Debian/Ubuntu): `build-essential cmake pkg-config libsdl2-dev libsdl2-ttf-dev lsof procps fonts-dejavu-core`. `wificommander` additionally requires `network-manager` (`nmcli`) at runtime, and `qrencode` to display the join-QR (silently degrades when missing). The ADC/PSU tools talk to a serial device (default `/dev/ttyUSB0`, override via argv[1]) and fall back to a demo mode when the port can't be opened.
 
-There is no test suite, no linter config, and no formatter config in the repo. The compile flags `-Wall -Wextra -Wpedantic` are the only enforced checks (CMakeLists.txt:7), and CI just runs `cmake --build` (`.github/workflows/build.yml`) — note that CI currently only uploads `portcommander` as an artifact, not `wificommander` or `apcommander`.
+There is no test suite, no linter config, and no formatter config in the repo. The compile flags `-Wall -Wextra -Wpedantic` are the only enforced checks for the native targets (`portcommander`, `wificommander`, `apcommander`). The imported `adc_gui` / `psu_gui*` targets were brought in with their upstream warnings still tripping (e.g. `usleep` deprecation under `_POSIX_C_SOURCE=200809L`); CMakeLists.txt suppresses a handful of `-Wno-unused-*` and `-Wno-sign-compare` for those targets only — don't propagate those suppressions to the native code. CI just runs `cmake --build` (`.github/workflows/build.yml`) and uploads all eight binaries as one artifact.
 
 ## Architecture
 
-Three executables built from one CMakeLists.txt:
+Eight executables built from one CMakeLists.txt:
 
-- **`apcommander`** (in `dash/`) is the user-facing entry point: a small SDL2 dashboard that resolves its own directory via `/proc/self/exe`, looks for sibling `portcommander` / `wificommander` binaries, and launches the chosen one via `fork`/`execvp`. It hides its window with `SDL_HideWindow` while the child runs and `SDL_ShowWindow` + `SDL_RaiseWindow` when the child exits. If a tool binary is missing, its tile is rendered with a "(binary not found)" footer and the click is a no-op.
-- **`portcommander`** (in `src/`) and **`wificommander`** (in `wifi/`) are the actual tools — independent executables, with their own SDL windows, fonts, and event loops. They are usable standalone (and built standalone), so each can be tested in isolation; the dashboard is just a launcher.
+- **`apcommander`** (in `dash/`) is the user-facing entry point: a small SDL2 dashboard that resolves its own directory via `/proc/self/exe`, registers tiles for the seven tools, and launches the chosen one via `fork`/`execvp`. It hides its window with `SDL_HideWindow` while the child runs and `SDL_ShowWindow` + `SDL_RaiseWindow` when the child exits. If a tool binary is missing, its tile is rendered with a "(binary not found)" footer and the click is a no-op. Layout is a 4-column grid (`MAX_TILES=12` ceiling for future expansion); window default 1000×580.
+- **`portcommander`** (in `src/`) and **`wificommander`** (in `wifi/`) are the *native* tools: written for this project, share the architectural shape described below, and are the parts of the codebase you should actively edit.
+- **`adc_gui`** (in `adc/`) and the four **`psu_gui*`** binaries (in `psu/`) are *imported* tools: they came in verbatim from the sibling projects `dev-psu-gui` and `dev-modbus/psu-gui`. Treat them as third-party — keep them buildable and runnable, but don't refactor them into the native architecture unless asked. Each has its own copy of `serial_port.{c,h}`; do not deduplicate without explicit instruction (the upstreams may diverge).
 
-The two tools share the same architectural shape — a parsing/data layer, a query layer, an SDL `ui_render` layer, and a `main.c` orchestrator that owns the event loop and is the only place that performs side effects (signals, fork+exec).
+### Native tool architecture (`portcommander`, `wificommander`)
+
+Both share the same shape — a parsing/data layer, a query layer, an SDL `ui_render` layer, and a `main.c` orchestrator that owns the event loop and is the only place that performs side effects (signals, fork+exec).
 
 ### Port Commander (`src/`, target `portcommander`)
 

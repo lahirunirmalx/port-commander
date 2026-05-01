@@ -26,13 +26,20 @@ static const SDL_Color COL_DIM = { 150, 154, 168, 255 };
 static const SDL_Color COL_ACCENT = { 100, 180, 255, 255 };
 static const SDL_Color COL_DANGER = { 200, 90, 90, 255 };
 
+#define MAX_TILES 12
+#define TILE_W 220
+#define TILE_H 140
+#define TILE_GAP 16
+#define GRID_COLS 4
+
 typedef struct Tile {
     SDL_Rect rect;
     const char *title;
     const char *desc;
-    const char *exe_path;
+    char exe_path[PATH_MAX];
     int hover;
     int missing; /* 1 if exe_path isn't executable */
+    char hotkey; /* '1'..'9' shown in corner; 0 = none */
 } Tile;
 
 static int pt_in_rect(int mx, int my, SDL_Rect r)
@@ -163,45 +170,81 @@ static int run_tool(SDL_Window *win, const char *path, char *errmsg,
     return -1;
 }
 
-static void layout_tiles(int win_w, int win_h, Tile tiles[2])
+static void register_tile(Tile *tiles, int *n, const char *title,
+                          const char *desc, const char *dir,
+                          const char *exe_name, char hotkey)
 {
-    int gap = 24;
-    int tile_w = (win_w - gap * 3) / 2;
-    int tile_h = 200;
-    int tiles_y = (win_h - tile_h) / 2 + 20;
+    Tile *t;
 
-    if (tile_w < 220)
-        tile_w = 220;
-
-    tiles[0].rect.x = gap;
-    tiles[0].rect.y = tiles_y;
-    tiles[0].rect.w = tile_w;
-    tiles[0].rect.h = tile_h;
-
-    tiles[1].rect.x = gap * 2 + tile_w;
-    tiles[1].rect.y = tiles_y;
-    tiles[1].rect.w = tile_w;
-    tiles[1].rect.h = tile_h;
+    if (*n >= MAX_TILES)
+        return;
+    t = &tiles[(*n)++];
+    memset(t, 0, sizeof(*t));
+    t->title = title;
+    t->desc = desc;
+    t->hotkey = hotkey;
+    snprintf(t->exe_path, sizeof(t->exe_path), "%s/%s", dir, exe_name);
+    t->missing = (access(t->exe_path, X_OK) != 0);
 }
 
-static void draw_tile(SDL_Renderer *r, TTF_Font *font_lg, TTF_Font *font_sm,
+static void layout_tiles(int win_w, int win_h, Tile *tiles, int n)
+{
+    int rows = (n + GRID_COLS - 1) / GRID_COLS;
+    int grid_w = GRID_COLS * TILE_W + (GRID_COLS - 1) * TILE_GAP;
+    int grid_h = rows * TILE_H + (rows - 1) * TILE_GAP;
+    /* Reserve space for the title/subtitle (~96 px) above and the footer
+     * (~48 px) below so the grid sits in the available middle band. */
+    int y_top = 96;
+    int y_bot = win_h - 48;
+    int avail_h = y_bot - y_top;
+    int x0 = (win_w - grid_w) / 2;
+    int y0 = y_top + (avail_h - grid_h) / 2;
+    int i;
+
+    if (x0 < TILE_GAP)
+        x0 = TILE_GAP;
+    if (y0 < y_top)
+        y0 = y_top;
+
+    for (i = 0; i < n; i++) {
+        int row = i / GRID_COLS;
+        int col = i % GRID_COLS;
+
+        tiles[i].rect.x = x0 + col * (TILE_W + TILE_GAP);
+        tiles[i].rect.y = y0 + row * (TILE_H + TILE_GAP);
+        tiles[i].rect.w = TILE_W;
+        tiles[i].rect.h = TILE_H;
+    }
+}
+
+static void draw_tile(SDL_Renderer *r, TTF_Font *font_md, TTF_Font *font_sm,
                       const Tile *t)
 {
     SDL_Color border = t->hover ? COL_ACCENT : COL_DIM;
     SDL_Color bg = t->hover ? COL_CARD_HOVER : COL_CARD;
     int cx = t->rect.x + t->rect.w / 2;
-    int title_y = t->rect.y + 56;
-    int desc_y = title_y + 36;
+    int title_y = t->rect.y + 22;
+    int desc_y = title_y + 32;
 
     draw_rect(r, t->rect, bg);
     draw_rect_outline(r, t->rect, border);
 
-    draw_text_centered(r, font_lg, t->title, cx, title_y, COL_TEXT);
+    /* Hotkey badge in the top-right corner */
+    if (t->hotkey) {
+        char hk[2] = { t->hotkey, 0 };
+        SDL_Rect badge = { t->rect.x + t->rect.w - 22,
+                           t->rect.y + 6, 16, 16 };
+        draw_rect_outline(r, badge, COL_DIM);
+        draw_text_centered(r, font_sm, hk, badge.x + badge.w / 2,
+                           badge.y + 1, COL_DIM);
+    }
+
+    draw_text_centered(r, font_md, t->title, cx, title_y, COL_TEXT);
     draw_text_centered(r, font_sm, t->desc, cx, desc_y, COL_DIM);
 
     if (t->missing) {
         draw_text_centered(r, font_sm, "(binary not found)", cx,
-                           t->rect.y + t->rect.h - 30, COL_DANGER);
+                           t->rect.y + t->rect.h - 26, COL_DANGER);
     }
 }
 
@@ -210,15 +253,13 @@ int main(int argc, char *argv[])
     SDL_Window *win = NULL;
     SDL_Renderer *r = NULL;
     TTF_Font *font_lg = NULL;
+    TTF_Font *font_md = NULL;
     TTF_Font *font_sm = NULL;
-    /* dir leaves headroom so PATH_MAX-sized port_path/wifi_path can always
-     * hold "<dir>/wificommander" without truncation. */
     char dir[PATH_MAX - 64];
-    char port_path[PATH_MAX];
-    char wifi_path[PATH_MAX];
     char status[512];
     const char *font_path = NULL;
-    Tile tiles[2];
+    Tile tiles[MAX_TILES];
+    int num_tiles = 0;
     int running = 1;
     int i;
 
@@ -226,26 +267,30 @@ int main(int argc, char *argv[])
     (void)argv;
 
     self_dir(dir, sizeof(dir));
-    snprintf(port_path, sizeof(port_path), "%s/portcommander", dir);
-    snprintf(wifi_path, sizeof(wifi_path), "%s/wificommander", dir);
     status[0] = '\0';
 
-    memset(tiles, 0, sizeof(tiles));
-    tiles[0].title = "Port Commander";
-    tiles[0].desc = "Inspect open TCP/UDP sockets";
-    tiles[0].exe_path = port_path;
-    tiles[0].missing = (access(port_path, X_OK) != 0);
-    tiles[1].title = "Wi-Fi Commander";
-    tiles[1].desc = "Manage Wi-Fi & hotspot";
-    tiles[1].exe_path = wifi_path;
-    tiles[1].missing = (access(wifi_path, X_OK) != 0);
+    register_tile(tiles, &num_tiles, "Port Commander",
+                  "Inspect open TCP/UDP sockets", dir, "portcommander", '1');
+    register_tile(tiles, &num_tiles, "Wi-Fi Commander",
+                  "Manage Wi-Fi & hotspot", dir, "wificommander", '2');
+    register_tile(tiles, &num_tiles, "ADC Monitor",
+                  "8-channel 24-bit ADC scope", dir, "adc_gui", '3');
+    register_tile(tiles, &num_tiles, "PSU Dual",
+                  "Dual-channel power supply", dir, "psu_gui", '4');
+    register_tile(tiles, &num_tiles, "PSU Single",
+                  "Single-channel power supply", dir, "psu_gui_single", '5');
+    register_tile(tiles, &num_tiles, "PSU Toolbar Dual",
+                  "Compact dual-channel strip", dir, "psu_gui_toolbar", '6');
+    register_tile(tiles, &num_tiles, "PSU Toolbar Single",
+                  "Compact single-channel strip", dir,
+                  "psu_gui_toolbar_single", '7');
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
     win = SDL_CreateWindow("APcommander", SDL_WINDOWPOS_CENTERED,
-                           SDL_WINDOWPOS_CENTERED, 720, 480,
+                           SDL_WINDOWPOS_CENTERED, 1000, 580,
                            SDL_WINDOW_RESIZABLE);
     if (!win) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
@@ -283,11 +328,14 @@ int main(int argc, char *argv[])
         return 1;
     }
     font_lg = TTF_OpenFont(font_path, 22);
-    font_sm = TTF_OpenFont(font_path, 13);
-    if (!font_lg || !font_sm) {
+    font_md = TTF_OpenFont(font_path, 16);
+    font_sm = TTF_OpenFont(font_path, 12);
+    if (!font_lg || !font_md || !font_sm) {
         fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
         if (font_lg)
             TTF_CloseFont(font_lg);
+        if (font_md)
+            TTF_CloseFont(font_md);
         if (font_sm)
             TTF_CloseFont(font_sm);
         TTF_Quit();
@@ -303,7 +351,7 @@ int main(int argc, char *argv[])
         SDL_Event e;
 
         SDL_GetWindowSize(win, &win_w, &win_h);
-        layout_tiles(win_w, win_h, tiles);
+        layout_tiles(win_w, win_h, tiles, num_tiles);
 
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) {
@@ -311,30 +359,37 @@ int main(int argc, char *argv[])
                 break;
             }
             if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_ESCAPE ||
-                    e.key.keysym.sym == SDLK_q) {
+                SDL_Keycode k = e.key.keysym.sym;
+
+                if (k == SDLK_ESCAPE || k == SDLK_q) {
                     running = 0;
                     break;
                 }
-                if (e.key.keysym.sym == SDLK_1 && !tiles[0].missing) {
-                    (void)run_tool(win, port_path, status, sizeof(status));
-                } else if (e.key.keysym.sym == SDLK_2 && !tiles[1].missing) {
-                    (void)run_tool(win, wifi_path, status, sizeof(status));
+                if (k >= SDLK_1 && k <= SDLK_9) {
+                    int idx = k - SDLK_1;
+                    if (idx < num_tiles && !tiles[idx].missing) {
+                        (void)run_tool(win, tiles[idx].exe_path, status,
+                                       sizeof(status));
+                    }
                 }
             } else if (e.type == SDL_MOUSEMOTION) {
-                tiles[0].hover = pt_in_rect(e.motion.x, e.motion.y,
-                                            tiles[0].rect);
-                tiles[1].hover = pt_in_rect(e.motion.x, e.motion.y,
-                                            tiles[1].rect);
+                int j;
+                for (j = 0; j < num_tiles; j++)
+                    tiles[j].hover = pt_in_rect(e.motion.x, e.motion.y,
+                                                tiles[j].rect);
             } else if (e.type == SDL_MOUSEBUTTONDOWN &&
                        e.button.button == SDL_BUTTON_LEFT) {
                 int mx = e.button.x;
                 int my = e.button.y;
-                if (pt_in_rect(mx, my, tiles[0].rect) && !tiles[0].missing) {
-                    (void)run_tool(win, port_path, status, sizeof(status));
-                } else if (pt_in_rect(mx, my, tiles[1].rect) &&
-                           !tiles[1].missing) {
-                    (void)run_tool(win, wifi_path, status, sizeof(status));
+                int j;
+
+                for (j = 0; j < num_tiles; j++) {
+                    if (pt_in_rect(mx, my, tiles[j].rect) &&
+                        !tiles[j].missing) {
+                        (void)run_tool(win, tiles[j].exe_path, status,
+                                       sizeof(status));
+                        break;
+                    }
                 }
             }
         }
@@ -342,27 +397,28 @@ int main(int argc, char *argv[])
         SDL_SetRenderDrawColor(r, COL_BG.r, COL_BG.g, COL_BG.b, 255);
         SDL_RenderClear(r);
 
-        draw_text_centered(r, font_lg, "APcommander", win_w / 2, 36,
+        draw_text_centered(r, font_lg, "APcommander", win_w / 2, 28,
                            COL_ACCENT);
         draw_text_centered(r, font_sm, "Local system utilities", win_w / 2,
-                           70, COL_DIM);
+                           62, COL_DIM);
 
-        draw_tile(r, font_lg, font_sm, &tiles[0]);
-        draw_tile(r, font_lg, font_sm, &tiles[1]);
+        for (i = 0; i < num_tiles; i++)
+            draw_tile(r, font_md, font_sm, &tiles[i]);
 
         if (status[0]) {
-            draw_text_centered(r, font_sm, status, win_w / 2, win_h - 56,
+            draw_text_centered(r, font_sm, status, win_w / 2, win_h - 44,
                                COL_DANGER);
         }
         draw_text_centered(r, font_sm,
-                           "Click a tile or press 1 / 2 to launch.   Esc to quit.",
-                           win_w / 2, win_h - 28, COL_DIM);
+                           "Click a tile or press 1–7 to launch.   Esc to quit.",
+                           win_w / 2, win_h - 22, COL_DIM);
 
         SDL_RenderPresent(r);
         SDL_Delay(16);
     }
 
     TTF_CloseFont(font_lg);
+    TTF_CloseFont(font_md);
     TTF_CloseFont(font_sm);
     TTF_Quit();
     SDL_DestroyRenderer(r);
