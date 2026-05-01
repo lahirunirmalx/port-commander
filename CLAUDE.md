@@ -1,0 +1,87 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & run
+
+```bash
+cmake -S . -B build
+cmake --build build
+./build/apcommander       # main dashboard — click a tile to launch a tool
+./build/portcommander     # standalone: network-port inspector
+./build/wificommander     # standalone: nmcli Wi-Fi / hotspot GUI
+```
+
+System dependencies (Debian/Ubuntu): `build-essential cmake pkg-config libsdl2-dev libsdl2-ttf-dev lsof procps fonts-dejavu-core`. `wificommander` additionally requires `network-manager` (`nmcli`) at runtime, and `qrencode` to display the join-QR (silently degrades when missing).
+
+There is no test suite, no linter config, and no formatter config in the repo. The compile flags `-Wall -Wextra -Wpedantic` are the only enforced checks (CMakeLists.txt:7), and CI just runs `cmake --build` (`.github/workflows/build.yml`) — note that CI currently only uploads `portcommander` as an artifact, not `wificommander` or `apcommander`.
+
+## Architecture
+
+Three executables built from one CMakeLists.txt:
+
+- **`apcommander`** (in `dash/`) is the user-facing entry point: a small SDL2 dashboard that resolves its own directory via `/proc/self/exe`, looks for sibling `portcommander` / `wificommander` binaries, and launches the chosen one via `fork`/`execvp`. It hides its window with `SDL_HideWindow` while the child runs and `SDL_ShowWindow` + `SDL_RaiseWindow` when the child exits. If a tool binary is missing, its tile is rendered with a "(binary not found)" footer and the click is a no-op.
+- **`portcommander`** (in `src/`) and **`wificommander`** (in `wifi/`) are the actual tools — independent executables, with their own SDL windows, fonts, and event loops. They are usable standalone (and built standalone), so each can be tested in isolation; the dashboard is just a launcher.
+
+The two tools share the same architectural shape — a parsing/data layer, a query layer, an SDL `ui_render` layer, and a `main.c` orchestrator that owns the event loop and is the only place that performs side effects (signals, fork+exec).
+
+### Port Commander (`src/`, target `portcommander`)
+
+Reads sockets from `lsof` / `/proc` and renders a live table.
+
+- **`src/lsof_parse.{c,h}`** — runs `lsof -i -P -n -F` via `popen` and parses its `-F` field-stream output into a `PortTable` of `PortRow{pid, comm, proto, name, state}`.
+- **`src/ps_query.{c,h}`** — fills a `ProcessDetail` for a single PID by reading `/proc/<pid>/status`, `/proc/<pid>/cmdline`, and `ps -p <pid> -o etime=`. Called only when the user selects a row.
+- **`src/ui_render.{c,h}`** — SDL rendering, scrolling, filter input, two-step kill confirm. Owns the `Ui` struct.
+- **`src/main.c`** — event loop, owns the `PortTable` and filtered `visible[]` slice, performs the `kill(pid, SIGTERM)`.
+
+### Wi-Fi Commander (`wifi/`, target `wificommander`)
+
+Wraps `nmcli` for Wi-Fi listing and hotspot start/stop. Built specifically because GNOME's "Turn On Wi-Fi Hotspot" toggle silently fails on some drivers while `nmcli device wifi hotspot` works.
+
+- **`wifi/nmcli_run.{c,h}`** — shared `fork`/`pipe`/`execvp` helpers: `nmcli_spawn_stdout` (read-only queries, FILE\* of stdout), `nmcli_run_capture_stderr` (one-shot actions, captures stderr for error reporting). All `nmcli` invocations go through these so user-supplied SSID/password values are passed as argv elements, never through a shell.
+- **`wifi/nmcli_query.{c,h}`** — `wifi_table_refresh` runs `nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID,BSSID device wifi list`. `wifi_state_refresh` discovers the wifi interface, the active wireless connection, and (if `802-11-wireless.mode == ap`) the hotspot SSID/PSK/band. Includes a `split_terse` parser that handles nmcli `-t` mode's `\:` and `\\` escapes (BSSIDs always contain colons).
+- **`wifi/nmcli_action.{c,h}`** — `nmcli_hotspot_up` builds the `nmcli device wifi hotspot ifname … ssid … password … [band …]` argv; `nmcli_hotspot_down` runs `nmcli connection down <name>`. Validates password length ≥ 8 and rejects values starting with `-` before forking (defense against argument-injection regressions in nmcli's option parser).
+- **`wifi/qr_codec.{c,h}`** — builds a `WIFI:T:WPA;S:<ssid>;P:<password>;;` payload (with the standard `\` escaping for `;:,\\"`), shells out to `qrencode -t UTF8`, and renders the captured Unicode block-character output as filled SDL rectangles. We invert qrencode's white-on-black-terminal convention: `' '` → both modules black, `▀` → bottom black, `▄` → top black, `█` → no-op. Used only when a hotspot is active; falls back to a "install qrencode" hint if the binary is missing.
+- **`wifi/ui_render.{c,h}`** — split layout: Wi-Fi list on the left, hotspot panel on the right with SSID/password text inputs, band selector (Auto/2.4GHz/5GHz), Start/Stop button, and (when active) the join-QR. Tracks `UiFocus` (none/filter/ssid/password) and routes `SDL_TEXTINPUT` to the focused buffer.
+- **`wifi/main.c`** — event loop, drives state + table refresh on action results, prefills the form from the active hotspot's settings on refresh (so editing reflects what's running), and uses a `sticky_msg` with a timeout so action results aren't immediately overwritten by the passive status line.
+
+### Event loop contract (the important glue)
+
+Both apps use the same pattern: `ui_handle_event` returns a small integer that `main.c` interprets. This is the only way the UI layer asks for state changes — keep the return-code table in the relevant `ui_render.h` in sync when adding codes.
+
+**Port Commander** (src/ui_render.h:36-41):
+
+| return | meaning                                           | main's response |
+|--------|---------------------------------------------------|-----------------|
+| 0      | nothing                                           | —               |
+| 1      | quit                                              | exit loop       |
+| 2      | refresh requested (F5)                            | re-run `lsof`   |
+| 3      | filter text changed                               | rebuild `visible[]`, clear selection |
+| 4      | selection changed                                 | reload `ProcessDetail` |
+| 5      | user confirmed kill (second click on Kill button) | `kill(pid, SIGTERM)`, then refresh |
+
+Two-step kill is enforced by `Ui.kill_confirm_pid`: the first click sets it to the selected PID, the second (return code 5) only fires `SIGTERM` if `pid == ui.kill_confirm_pid` (src/main.c:170-183).
+
+**Wi-Fi Commander** (wifi/ui_render.h:46-51):
+
+| return | meaning                | main's response |
+|--------|------------------------|-----------------|
+| 0      | nothing                | —               |
+| 1      | quit                   | exit loop       |
+| 2      | refresh requested      | re-run `wifi_state_refresh` + `wifi_table_refresh` |
+| 3      | filter text changed    | rebuild `visible[]`, clear selection |
+| 4      | selection changed      | (reserved — currently no per-row detail load) |
+| 5      | start hotspot          | `nmcli_hotspot_up` with `ui.ssid_input` / `ui.password_input` / `ui.band` |
+| 6      | stop hotspot           | `nmcli_hotspot_down(state.hotspot_conn)` |
+
+Hotspot actions are not gated by a two-step confirm (unlike kill) — both are reversible, and typing a password is itself a deliberate action.
+
+### Conventions worth knowing
+
+- **No privilege escalation.** None of the three binaries invoke `sudo` themselves. `portcommander` users who need other users' sockets run that binary (or apcommander) under sudo; `wificommander` relies on the user's PolicyKit/D-Bus permissions for NetworkManager. The dashboard is a thin launcher and inherits the user's privileges as-is. Keep it that way.
+- **Dashboard binary discovery.** `apcommander` resolves its own directory via `readlink("/proc/self/exe")` and looks for siblings — it does not do `$PATH` lookup, so the three binaries must live next to each other (the build directory satisfies this). If you reorganize install layout, update `self_dir()` in `dash/main.c`.
+- **SIGTERM only** in `portcommander`. The kill path sends `SIGTERM`, never `SIGKILL`. Don't add a "force kill" without an explicit ask.
+- **Never build shell command strings from user input.** `wificommander` accepts SSID and password from text fields — these are passed through `execvp` argv arrays in `nmcli_action.c`, never concatenated into a `popen` string. `nmcli_query.c`'s queries use static argv (no user input), but they still go through `fork`/`exec` rather than `popen` to keep the pattern consistent and the parsing safe.
+- **Font discovery is a hardcoded fallback list** in each `main.c` (DejaVu → Liberation → Noto). Add new candidates to that array rather than introducing a config file. Both apps share the same list — keep them in sync if you change it.
+- **Fixed-size char buffers everywhere** (`PORT_ROW_*_MAX`, `WIFI_*_MAX`, `UI_*_MAX`). Use `snprintf` and respect the existing limits rather than switching individual fields to dynamic allocation.
+- **C11, no external deps beyond SDL2/SDL2_ttf, plus the runtime binaries (`lsof`/`ps` for portcommander, `nmcli` for wificommander).** Don't pull in new libraries casually — the point of this project is to stay small and apt-installable.

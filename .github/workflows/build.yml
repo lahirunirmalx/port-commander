@@ -32,9 +32,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Upload portcommander binary
+      - name: Upload apcommander suite
         uses: actions/upload-artifact@v4
         with:
-          name: portcommander-linux-x64
-          path: build/portcommander
+          name: apcommander-linux-x64
+          path: |
+            build/apcommander
+            build/portcommander
+            build/wificommander
           if-no-files-found: error
