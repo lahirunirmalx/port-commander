@@ -250,7 +250,7 @@ static void format_measurement(DmmMode m, double v, char *out, size_t outsz,
         unit = "";
         break;
     }
-    snprintf(out, outsz, "%+9.4f", v * scale);
+    snprintf(out, outsz, "%+8.3f", v * scale);
     snprintf(unit_out, unitsz, "%s%s", prefix, unit);
 }
 
@@ -389,6 +389,10 @@ static void draw_vfd_panel(SDL_Renderer *r, App *a, int x, int y, int w, int h)
     VfdColor off_col = { COL_VFD_OFF.r, COL_VFD_OFF.g, COL_VFD_OFF.b, 255 };
     int dot_size, dot_gap, char_gap;
     int num_w;
+    int chars;
+    int avail_w, avail_h;
+    int header_reserve = 24;
+    int side_pad = 16;
 
     set_color(r, COL_VFD_BG);
     fill_rect(r, x, y, w, h);
@@ -399,21 +403,21 @@ static void draw_vfd_panel(SDL_Renderer *r, App *a, int x, int y, int w, int h)
 
     format_measurement(a->mode, a->value, num, sizeof(num), unit, sizeof(unit));
 
-    /* VFD dot-matrix — scale to fit the panel height. Each glyph is 7 dots
-     * tall plus inter-dot gaps, so total height ≈ 7*(2*dot+gap). Aim to
-     * occupy ~55% of the panel height. */
-    dot_size = h / 28;
-    if (dot_size < 2)
-        dot_size = 2;
-    if (dot_size > 5)
-        dot_size = 5;
+    /* Reserve room on the right for the unit label so we know how much
+     * width is available for the dot-matrix number. */
+    TTF_SizeUTF8(a->font_large, unit, &unit_tw, &unit_th);
+
+    chars = (int)strlen(num);
+    avail_w = w - side_pad * 2 - unit_tw - 24; /* 24 = unit gap */
+    avail_h = h - header_reserve - 12;
+
+    /* Auto-size: largest dot that fits both the number's width and the
+     * panel's height. Caps avoid absurdly large dots in huge windows. */
+    dot_size = vfd_fit_dot_size(chars, avail_w, avail_h, 2, 6);
     dot_gap = 1;
-    char_gap = dot_size * 3;
+    char_gap = dot_size * 2;
 
     num_w = vfd_measure(num, dot_size, dot_gap, char_gap);
-
-    /* Reserve room on the right for the unit label */
-    TTF_SizeUTF8(a->font_large, unit, &unit_tw, &unit_th);
 
     {
         int total_w = num_w + 24 + unit_tw;
@@ -421,8 +425,8 @@ static void draw_vfd_panel(SDL_Renderer *r, App *a, int x, int y, int w, int h)
         int dot_h = 7 * (dot_size * 2 + dot_gap);
         int start_y = y + (h - dot_h) / 2;
 
-        if (start_x < x + 12)
-            start_x = x + 12;
+        if (start_x < x + side_pad)
+            start_x = x + side_pad;
         vfd_draw_number(r, start_x, start_y, num, dot_size, dot_gap, char_gap,
                         on_col, off_col, true);
         draw_text(r, a->font_large, unit, start_x + num_w + 24,

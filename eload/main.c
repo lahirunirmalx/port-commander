@@ -444,15 +444,19 @@ static void draw_setpoint_row(SDL_Renderer *r, App *a)
                  MODE_UNITS[a->mode]);
         draw_text(r, a->font_large, buf, b.x + 12, b.y + 6, COL_VFD_ON);
     } else {
-        int dot_size = 2;
-        int dot_gap = 1;
-        int char_gap = dot_size * 3;
+        int dot_size, dot_gap, char_gap;
+        int chars;
         int unit_tw = 0, unit_th = 0;
         int num_w;
 
         snprintf(buf, sizeof(buf), "%7.3f", a->setpoint[a->mode]);
-        num_w = vfd_measure(buf, dot_size, dot_gap, char_gap);
         TTF_SizeUTF8(a->font_med, MODE_UNITS[a->mode], &unit_tw, &unit_th);
+
+        chars = (int)strlen(buf);
+        dot_size = vfd_fit_dot_size(chars, b.w - 16 - unit_tw, b.h - 6, 1, 3);
+        dot_gap = 1;
+        char_gap = dot_size * 2;
+        num_w = vfd_measure(buf, dot_size, dot_gap, char_gap);
 
         {
             int dot_h = 7 * (dot_size * 2 + dot_gap);
@@ -509,19 +513,11 @@ static void draw_readout(SDL_Renderer *r, App *a, int x, int y, int w, int h,
         int sy = y + 36;
         int sw = w - 24;
         int sh = h - 50;
-        int dot_size = sh / 30;
-        int dot_gap = 1;
-        int char_gap;
+        int dot_size, dot_gap, char_gap;
         int dot_h;
         int num_w;
+        int chars;
         int unit_tw = 0, unit_th = 0;
-
-        if (dot_size < 2)
-            dot_size = 2;
-        if (dot_size > 4)
-            dot_size = 4;
-        char_gap = dot_size * 3;
-        dot_h = 7 * (dot_size * 2 + dot_gap);
 
         set_color(r, COL_VFD_BG);
         fill_rect(r, sx, sy, sw, sh);
@@ -529,8 +525,16 @@ static void draw_readout(SDL_Renderer *r, App *a, int x, int y, int w, int h,
         stroke_rect(r, sx, sy, sw, sh);
 
         snprintf(buf, sizeof(buf), "%7.3f", value);
-        num_w = vfd_measure(buf, dot_size, dot_gap, char_gap);
         TTF_SizeUTF8(a->font_large, unit, &unit_tw, &unit_th);
+
+        chars = (int)strlen(buf);
+        /* Auto-size to fit both width and height with margin for the unit
+         * label on the right. */
+        dot_size = vfd_fit_dot_size(chars, sw - 20 - unit_tw, sh - 12, 2, 5);
+        dot_gap = 1;
+        char_gap = dot_size * 2;
+        dot_h = 7 * (dot_size * 2 + dot_gap);
+        num_w = vfd_measure(buf, dot_size, dot_gap, char_gap);
 
         {
             int total_w = num_w + 12 + unit_tw;

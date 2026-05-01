@@ -176,6 +176,38 @@ static inline int vfd_draw_number(SDL_Renderer *r, int x, int y,
 }
 
 /*
+ * Picks the largest dot_size in [min_size, max_size] such that the given
+ * `chars`-long number string fits in (avail_w × avail_h), assuming
+ * dot_gap=1 and char_gap = 2 * dot_size. Width math:
+ *
+ *   per-glyph width  = 5 * (2*dot + 1)              = 10*dot + 5
+ *   per-char-gap     = 2*dot
+ *   total_w(N, dot)  = N*(10*dot + 5) + (N-1)*2*dot = (12N - 2)*dot + 5N
+ *   total_h(dot)     = 7*(2*dot + 1)                = 14*dot + 7
+ *
+ * Use this before vfd_draw_number / vfd_measure so the readout always
+ * fits the panel rather than overflowing.
+ */
+static inline int vfd_fit_dot_size(int chars, int avail_w, int avail_h,
+                                   int min_size, int max_size)
+{
+    int dot_w;
+    int dot_h;
+    int dot;
+
+    if (chars <= 0)
+        return min_size;
+    dot_w = (avail_w - 5 * chars) / (12 * chars - 2);
+    dot_h = (avail_h - 7) / 14;
+    dot = dot_w < dot_h ? dot_w : dot_h;
+    if (dot < min_size)
+        dot = min_size;
+    if (dot > max_size)
+        dot = max_size;
+    return dot;
+}
+
+/*
  * Returns how wide a string would render at the given dot/gap settings.
  * Useful for right-aligning a readout in a panel.
  */
