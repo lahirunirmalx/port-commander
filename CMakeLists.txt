@@ -58,10 +58,23 @@ target_link_libraries(apcommander PRIVATE
     apcompat
     ${SDL2_LIBRARIES}
     ${SDL2_TTF_LIBRARIES}
+    m
 )
 target_compile_options(apcommander PRIVATE
     ${SDL2_CFLAGS_OTHER}
     ${SDL2_TTF_CFLAGS_OTHER}
+)
+
+# Ship the default tile config next to the binary. The dashboard reads
+# tiles only from files — if this isn't present alongside apcommander,
+# starting the dashboard requires a user config at one of the higher-
+# priority search locations.
+add_custom_command(TARGET apcommander POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/dash/apcommander.default.conf"
+        "$<TARGET_FILE_DIR:apcommander>/apcommander.default.conf"
+    COMMENT "Copying default launcher config next to apcommander"
+    VERBATIM
 )
 
 # -----------------------------------------------------------------------------

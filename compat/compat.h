@@ -43,15 +43,29 @@ const char *compat_exe_suffix(void);
 int compat_can_execute(const char *path);
 
 /*
- * Spawns the executable at `path` with no extra arguments and returns
- * immediately. Returns a non-NULL handle on success; returns NULL on
- * failure with errmsg filled (errmsg may be NULL).
+ * Spawns the executable at `path` and returns immediately. If `argv` is
+ * non-NULL, it is a NULL-terminated array of arguments passed to the
+ * child (argv[0] is conventionally the program name and is what the
+ * child sees as its argv[0]). If `argv` is NULL, the child is invoked
+ * with the single-element argv `{path, NULL}` for back-compat.
+ *
+ * Returns a non-NULL handle on success; returns NULL on failure with
+ * errmsg filled (errmsg may be NULL).
  *
  * Inherits the parent's stdin/stdout/stderr — child tool windows are
  * separate SDL windows, so terminal output (if any) goes to the parent's
  * terminal.
  */
-CompatProc *compat_spawn(const char *path, char *errmsg, size_t errsz);
+CompatProc *compat_spawn(const char *path, char *const argv[],
+                         char *errmsg, size_t errsz);
+
+/*
+ * Searches $PATH for an executable named `name` (which must not contain
+ * a path separator). On success, writes the absolute path to `out` and
+ * returns 0. Returns -1 if `name` isn't found, isn't executable, or the
+ * arguments are invalid.
+ */
+int compat_path_lookup(const char *name, char *out, size_t outsz);
 
 /*
  * Polls the child without blocking.

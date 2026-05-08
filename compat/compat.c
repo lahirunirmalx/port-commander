@@ -80,9 +80,11 @@ struct CompatProc {
     int exit_code;
 };
 
-CompatProc *compat_spawn(const char *path, char *errmsg, size_t errsz)
+CompatProc *compat_spawn(const char *path, char *const argv[],
+                         char *errmsg, size_t errsz)
 {
     CompatProc *p;
+    char *const default_argv[2] = { (char *)path, NULL };
 
     if (errmsg && errsz)
         errmsg[0] = '\0';
@@ -91,6 +93,8 @@ CompatProc *compat_spawn(const char *path, char *errmsg, size_t errsz)
             snprintf(errmsg, errsz, "compat_spawn: empty path");
         return NULL;
     }
+    if (!argv)
+        argv = default_argv;
     p = calloc(1, sizeof(*p));
     if (!p) {
         if (errmsg)
@@ -102,12 +106,40 @@ CompatProc *compat_spawn(const char *path, char *errmsg, size_t errsz)
     {
         STARTUPINFOA si;
         PROCESS_INFORMATION pi;
-        char cmdline[1024];
+        char cmdline[2048];
+        char *cp = cmdline;
+        char *cend = cmdline + sizeof(cmdline);
+        int i;
 
         memset(&si, 0, sizeof(si));
         memset(&pi, 0, sizeof(pi));
         si.cb = sizeof(si);
-        snprintf(cmdline, sizeof(cmdline), "\"%s\"", path);
+
+        /* Build cmdline with naive but correct enough quoting: each arg
+         * containing whitespace is wrapped in double quotes; embedded
+         * double quotes are backslash-escaped. */
+        for (i = 0; argv[i] && cp < cend - 1; i++) {
+            const char *a = argv[i];
+            int need_q = (strchr(a, ' ') || strchr(a, '\t'));
+
+            if (i > 0 && cp < cend - 1)
+                *cp++ = ' ';
+            if (need_q && cp < cend - 1)
+                *cp++ = '"';
+            while (*a && cp < cend - 1) {
+                if (*a == '"' && cp < cend - 2) {
+                    *cp++ = '\\';
+                    *cp++ = '"';
+                } else {
+                    *cp++ = *a;
+                }
+                a++;
+            }
+            if (need_q && cp < cend - 1)
+                *cp++ = '"';
+        }
+        *cp = '\0';
+
         if (!CreateProcessA(path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL,
                             &si, &pi)) {
             if (errmsg)
@@ -129,7 +161,6 @@ CompatProc *compat_spawn(const char *path, char *errmsg, size_t errsz)
             return NULL;
         }
         if (pid == 0) {
-            char *argv[2] = { (char *)path, NULL };
             struct rlimit rl;
             int max_fd;
             int fd;
@@ -157,6 +188,56 @@ CompatProc *compat_spawn(const char *path, char *errmsg, size_t errsz)
     }
 #endif
     return p;
+}
+
+int compat_path_lookup(const char *name, char *out, size_t outsz)
+{
+    const char *path_env;
+    const char *p;
+#ifdef _WIN32
+    const char sep = ';';
+#else
+    const char sep = ':';
+#endif
+
+    if (!name || !name[0] || !out || outsz == 0)
+        return -1;
+    out[0] = '\0';
+    /* Reject names that contain a path separator — caller should resolve
+     * those directly (relative to app dir or as-is). */
+    if (strchr(name, '/'))
+        return -1;
+#ifdef _WIN32
+    if (strchr(name, '\\'))
+        return -1;
+#endif
+    path_env = getenv("PATH");
+    if (!path_env || !path_env[0])
+        return -1;
+
+    p = path_env;
+    while (*p) {
+        const char *end = strchr(p, sep);
+        size_t dlen = end ? (size_t)(end - p) : strlen(p);
+        char dir[1024];
+
+        if (dlen > 0 && dlen < sizeof(dir)) {
+            int written;
+
+            memcpy(dir, p, dlen);
+            dir[dlen] = '\0';
+            written = snprintf(out, outsz, "%s/%s%s", dir, name,
+                               compat_exe_suffix());
+            if (written > 0 && (size_t)written < outsz &&
+                compat_can_execute(out))
+                return 0;
+        }
+        if (!end)
+            break;
+        p = end + 1;
+    }
+    out[0] = '\0';
+    return -1;
 }
 
 int compat_proc_poll(CompatProc *p, int *out_exit_code)
