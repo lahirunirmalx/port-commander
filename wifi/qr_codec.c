@@ -37,12 +37,14 @@ int qr_build_wifi(const char *ssid, const char *password, char *out,
     char esc_ssid[200];
     char esc_pwd[200];
     char payload[700];
-    char *argv[8];
+    size_t payload_len;
+    char *argv[5];
     pid_t pid = -1;
     FILE *fp;
     char buf[1024];
     size_t off = 0;
     int rc;
+    int truncated = 0;
 
     if (out && outsz)
         out[0] = '\0';
@@ -55,28 +57,35 @@ int qr_build_wifi(const char *ssid, const char *password, char *out,
         return -1;
 
     if (password && password[0])
-        snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;", esc_ssid,
-                 esc_pwd);
+        payload_len = (size_t)snprintf(payload, sizeof(payload),
+            "WIFI:T:WPA;S:%s;P:%s;;", esc_ssid, esc_pwd);
     else
-        snprintf(payload, sizeof(payload), "WIFI:T:nopass;S:%s;;", esc_ssid);
+        payload_len = (size_t)snprintf(payload, sizeof(payload),
+            "WIFI:T:nopass;S:%s;;", esc_ssid);
+    if (payload_len >= sizeof(payload))
+        return -1;
 
+    /* Pass the WIFI: payload through qrencode's stdin, NOT argv. The
+     * argv form (which we used previously) put the plaintext PSK in
+     * /proc/<pid>/cmdline for the lifetime of the qrencode child —
+     * any local user could read it during that ~50 ms window. */
     argv[0] = "qrencode";
     argv[1] = "-t";
     argv[2] = "UTF8";
-    argv[3] = "-o";
-    argv[4] = "-";
-    argv[5] = payload;
-    argv[6] = NULL;
+    argv[3] = "-o-";
+    argv[4] = NULL;
 
-    fp = nmcli_spawn_stdout(argv, &pid);
+    fp = nmcli_spawn_stdin_stdout(argv, payload, payload_len, &pid);
     if (!fp)
         return -1;
 
     while (fgets(buf, sizeof(buf), fp)) {
         size_t n = strlen(buf);
 
-        if (off + n + 1 >= outsz)
+        if (off + n + 1 >= outsz) {
+            truncated = 1;
             break;
+        }
         memcpy(out + off, buf, n);
         off += n;
     }
@@ -84,6 +93,13 @@ int qr_build_wifi(const char *ssid, const char *password, char *out,
     fclose(fp);
     rc = nmcli_reap(pid);
 
+    /* Treat truncation as failure: rendering a half-QR would silently
+     * give the user an unscannable code with no diagnostic. The UI
+     * fallback hint ("install qrencode") is more honest. */
+    if (truncated) {
+        out[0] = '\0';
+        return -1;
+    }
     if (off > 0)
         out[off] = '\0';
     return (rc == 0 && off > 0) ? 0 : -1;

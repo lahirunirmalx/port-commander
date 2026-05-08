@@ -538,8 +538,14 @@ int ui_handle_event(Ui *ui, const SDL_Event *e, const PortRow *visible,
                         return 0;
                     }
                 } else if (r_kill.w > 0 && pt_in_rect(mx, my, r_kill)) {
-                    if (sel_pid > 0)
+                    if (sel_pid > 0) {
                         ui->kill_confirm_pid = sel_pid;
+                        /* Snapshot the process's starttime — main.c
+                         * re-reads it before kill() to detect PID
+                         * reuse since the dialog was armed. */
+                        ui->kill_confirm_starttime =
+                            proc_read_starttime(sel_pid);
+                    }
                     return 0;
                 }
                 return 0;

@@ -1,4 +1,5 @@
 #include "ps_query.h"
+#include "spawn_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,21 +110,41 @@ static int load_cmdline(int pid, ProcessDetail *d)
 
 static void load_etime(int pid, ProcessDetail *d)
 {
-    char cmd[128];
+    char ps_path[1024];
+    char pid_str[32];
+    char *argv[6];
+    pid_t child;
     FILE *fp;
 
     d->etime[0] = '\0';
-    if (snprintf(cmd, sizeof(cmd), "ps -p %d -o etime= 2>/dev/null", pid) >=
-        (int)sizeof(cmd))
+    if (spawn_resolve_abs("ps", ps_path, sizeof(ps_path)) != 0)
+        return;
+    if (snprintf(pid_str, sizeof(pid_str), "%d", pid) >= (int)sizeof(pid_str))
         return;
 
-    fp = popen(cmd, "r");
+    /* Build argv discretely so execv (no shell) takes them as separate
+     * elements. Replaces the previous popen() form which invoked
+     * /bin/sh and was vulnerable to PATH planting under sudo. */
+    argv[0] = ps_path;
+    argv[1] = "-p";
+    argv[2] = pid_str;
+    argv[3] = "-o";
+    argv[4] = "etime=";
+    argv[5] = NULL;
+
+    fp = spawn_capture_stdout(ps_path, argv, &child);
     if (!fp)
         return;
-    if (fgets(d->etime, sizeof(d->etime), fp)) {
+    if (fgets(d->etime, sizeof(d->etime), fp))
         trim_newline(d->etime);
+    /* Drain anything else so the child can finish writing without
+     * blocking. */
+    {
+        char drain[256];
+        while (fgets(drain, sizeof(drain), fp)) { /* discard */ }
     }
-    (void)pclose(fp);
+    fclose(fp);
+    (void)spawn_reap(child);
 }
 
 int process_detail_load(int pid, ProcessDetail *d)
@@ -145,57 +166,61 @@ int process_detail_load(int pid, ProcessDetail *d)
     return 0;
 }
 
-int ps_query_pid(int pid, char *buf, size_t buflen)
+unsigned long long proc_read_starttime(int pid)
 {
-    char cmd[256];
+    char path[64];
     FILE *fp;
-    size_t off = 0;
+    char buf[4096];
+    size_t n;
+    char *p;
+    int field;
+    unsigned long long start_ticks = 0;
 
-    if (!buf || buflen < 32)
-        return -1;
-    buf[0] = '\0';
-
-    if (pid <= 0) {
-        strncpy(buf, "(no process)", buflen - 1);
-        buf[buflen - 1] = '\0';
+    if (pid <= 0)
         return 0;
-    }
 
-    if (snprintf(cmd, sizeof(cmd),
-                 "ps -p %d -o pid=,uid=,gid=,comm=,etime=,cmd= 2>/dev/null",
-                 pid) >= (int)sizeof(cmd))
-        return -1;
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    fp = fopen(path, "r");
+    if (!fp)
+        return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    if (n == 0)
+        return 0;
+    buf[n] = '\0';
 
-    fp = popen(cmd, "r");
-    if (!fp) {
-        strncpy(buf, "ps: popen failed", buflen - 1);
-        buf[buflen - 1] = '\0';
-        return -1;
-    }
-
-    {
-        char line[1024];
-
-        while (fgets(line, sizeof(line), fp) && off + 1 < buflen) {
-            size_t l = strlen(line);
-            if (off + l >= buflen)
-                l = buflen - 1 - off;
-            memcpy(buf + off, line, l);
-            off += l;
-            buf[off] = '\0';
+    /* /proc/<pid>/stat layout: "PID (COMM) STATE PPID ..." with COMM
+     * possibly containing spaces and parens. Skip past the closing
+     * paren of COMM, then count whitespace-separated fields. The
+     * starttime is field 22 in the post-COMM sequence (so field 20
+     * after STATE — STATE itself being post-COMM field 1).
+     *
+     * Fields after COMM (1-indexed): state ppid pgrp session tty_nr
+     * tpgid flags minflt cminflt majflt cmajflt utime stime cutime
+     * cstime priority nice num_threads itrealvalue starttime[20] ...
+     *
+     * /proc(5) numbers COMM as 2 and starttime as 22; counting from
+     * the field-after-COMM gives index 20. */
+    p = strrchr(buf, ')');
+    if (!p)
+        return 0;
+    p++;
+    field = 0;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (!*p)
+            break;
+        field++;
+        if (field == 20) {
+            char *endp;
+            unsigned long long v = strtoull(p, &endp, 10);
+            if (endp != p)
+                start_ticks = v;
+            break;
         }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
     }
-
-    if (pclose(fp) == -1) {
-        strncpy(buf, "ps: pclose failed", buflen - 1);
-        buf[buflen - 1] = '\0';
-        return -1;
-    }
-
-    if (off == 0) {
-        strncpy(buf, "(ps: no such pid or denied)", buflen - 1);
-        buf[buflen - 1] = '\0';
-    }
-
-    return 0;
+    return start_ticks;
 }

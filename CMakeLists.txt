@@ -91,6 +91,7 @@ if(BUILD_LINUX_TOOLS)
         src/main.c
         src/lsof_parse.c
         src/ps_query.c
+        src/spawn_util.c
         src/ui_render.c
     )
     target_include_directories(portcommander PRIVATE

@@ -23,8 +23,14 @@ typedef struct Ui {
     char filter[UI_FILTER_MAX];
     int filter_focus;
 
-    /* Two-step kill: show confirm when == selected row pid */
+    /* Two-step kill: show confirm when == selected row pid. The
+     * accompanying starttime is captured from /proc/<pid>/stat at
+     * arm-time and re-checked before kill() — together they fingerprint
+     * the process across PID recycling, so a long-open confirm dialog
+     * can't end up signalling a different process that happens to
+     * have grabbed the same PID. */
     int kill_confirm_pid;
+    unsigned long long kill_confirm_starttime;
 } Ui;
 
 int ui_init(Ui *ui, const char *font_path, int font_px);

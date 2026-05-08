@@ -1,12 +1,14 @@
 #include "lsof_parse.h"
+#include "spawn_util.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define LSOF_CMD "lsof -i -P -n -F 2>/dev/null"
 #define ROW_CAP_MAX 20000
-#define LINE_MAX 4096
+#define LSOF_LINE_MAX 4096
 
 static void copy_field(char *dst, size_t dstsz, const char *src)
 {
@@ -66,11 +68,35 @@ void port_table_free(PortTable *t)
     port_table_init(t);
 }
 
+/*
+ * Parses one decimal int from `s` into *out. Returns 0 on a successful
+ * parse of a positive value; -1 otherwise. Replaces atoi(), which
+ * silently returns 0 on garbage and gives no overflow signal.
+ */
+static int parse_pos_int(const char *s, int *out)
+{
+    char *endp;
+    long v;
+
+    if (!s || !s[0])
+        return -1;
+    errno = 0;
+    v = strtol(s, &endp, 10);
+    if (endp == s || errno == ERANGE || v <= 0 || v > INT_MAX)
+        return -1;
+    *out = (int)v;
+    return 0;
+}
+
 int port_table_refresh(PortTable *t)
 {
+    char lsof_path[1024];
+    char *argv[7];
+    pid_t pid_child = -1;
     FILE *fp;
-    char line[LINE_MAX];
+    char line[LSOF_LINE_MAX];
     int pid = -1;
+    int reached_cap = 0;
     char comm[PORT_ROW_COMM_MAX];
     char proto[PORT_ROW_PROTO_MAX];
     char name[PORT_ROW_NAME_MAX];
@@ -87,9 +113,26 @@ int port_table_refresh(PortTable *t)
     name[0] = '\0';
     state[0] = '\0';
 
-    fp = popen(LSOF_CMD, "r");
+    if (spawn_resolve_abs("lsof", lsof_path, sizeof(lsof_path)) != 0) {
+        copy_field(t->err, sizeof(t->err),
+                   "lsof not found in /usr/bin or /usr/sbin.");
+        return -1;
+    }
+
+    /* Build argv with flag-separated arguments — execv takes them as
+     * discrete elements, so no shell parsing happens. The previous
+     * popen("lsof -i -P -n -F 2>/dev/null") form invoked /bin/sh and
+     * was vulnerable to PATH planting under sudo without secure_path. */
+    argv[0] = lsof_path;
+    argv[1] = "-i";
+    argv[2] = "-P";
+    argv[3] = "-n";
+    argv[4] = "-F";
+    argv[5] = NULL;
+
+    fp = spawn_capture_stdout(lsof_path, argv, &pid_child);
     if (!fp) {
-        copy_field(t->err, sizeof(t->err), "popen(lsof) failed.");
+        copy_field(t->err, sizeof(t->err), "spawn(lsof) failed.");
         return -1;
     }
 
@@ -102,11 +145,16 @@ int port_table_refresh(PortTable *t)
 
         switch (line[0]) {
         case 'p': {
+            int p_int;
+
             flush_fd_row(t, pid, comm, proto, name, state);
             proto[0] = '\0';
             name[0] = '\0';
             state[0] = '\0';
-            pid = atoi(line + 1);
+            if (parse_pos_int(line + 1, &p_int) == 0)
+                pid = p_int;
+            else
+                pid = -1; /* malformed — drop subsequent fields for it */
             break;
         }
         case 'c':
@@ -133,14 +181,27 @@ int port_table_refresh(PortTable *t)
             break;
         }
 
-        if (t->err[0] && t->count >= ROW_CAP_MAX)
+        if (t->err[0] && t->count >= ROW_CAP_MAX) {
+            reached_cap = 1;
             break;
+        }
     }
 
     flush_fd_row(t, pid, comm, proto, name, state);
 
-    if (pclose(fp) == -1) {
-        copy_field(t->err, sizeof(t->err), "pclose(lsof) failed.");
+    /* If we broke out of the loop on the row cap, drain the rest of
+     * the pipe before fclose so the child isn't blocked in write(2).
+     * Without this, spawn_reap below could hang indefinitely on a
+     * host with very many sockets. */
+    if (reached_cap) {
+        while (fgets(line, sizeof(line), fp)) {
+            /* discard */
+        }
+    }
+
+    fclose(fp);
+    if (spawn_reap(pid_child) < 0 && t->err[0] == '\0') {
+        copy_field(t->err, sizeof(t->err), "lsof exited abnormally.");
         return -1;
     }
 

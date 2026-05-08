@@ -21,8 +21,14 @@ typedef struct ProcessDetail {
 int process_detail_load(int pid, ProcessDetail *d);
 
 /*
- * Legacy one-line ps summary (optional).
+ * Reads the `starttime` field (field 22) from /proc/<pid>/stat as
+ * jiffies since boot. Stable for the lifetime of the process and
+ * unique per-process even across PID reuse, so it's the right
+ * fingerprint to capture before kill confirm and re-check before
+ * kill — closes the PID-recycling race window.
+ *
+ * Returns 0 if the PID can't be read or the value can't be parsed.
  */
-int ps_query_pid(int pid, char *buf, size_t buflen);
+unsigned long long proc_read_starttime(int pid);
 
 #endif

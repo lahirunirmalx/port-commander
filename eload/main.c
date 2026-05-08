@@ -694,10 +694,18 @@ static void on_click(App *a, int x, int y)
 static void apply_edit(App *a)
 {
     if (a->edit_pos > 0) {
-        double v = atof(a->edit_buf);
+        char *endp;
+        double v = strtod(a->edit_buf, &endp);
 
-        a->setpoint[a->mode] = v;
-        clamp_setpoint(a);
+        /* Reject unparseable input ("--", ".", garbage) and non-finite
+         * values (NaN, ±inf from "1e9999"). atof would silently
+         * substitute 0/inf/NaN and propagate NaN through every
+         * downstream simulator readout, with all comparison-based
+         * protections (OVP/OCP/OPP) returning false on NaN. */
+        if (endp != a->edit_buf && isfinite(v)) {
+            a->setpoint[a->mode] = v;
+            clamp_setpoint(a);
+        }
     }
     a->editing = false;
     SDL_StopTextInput();
@@ -767,6 +775,14 @@ int main(int argc, char *argv[])
     if (!g_app.font_huge || !g_app.font_large || !g_app.font_med ||
         !g_app.font_small) {
         fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
+        if (g_app.font_huge)  TTF_CloseFont(g_app.font_huge);
+        if (g_app.font_large) TTF_CloseFont(g_app.font_large);
+        if (g_app.font_med)   TTF_CloseFont(g_app.font_med);
+        if (g_app.font_small) TTF_CloseFont(g_app.font_small);
+        SDL_DestroyRenderer(g_app.renderer);
+        SDL_DestroyWindow(g_app.window);
+        TTF_Quit();
+        SDL_Quit();
         return 1;
     }
 
@@ -820,7 +836,11 @@ int main(int argc, char *argv[])
                         g_app.trip_reason[0] = '\0';
                     }
                     g_app.input_on = !g_app.input_on;
-                } else if (k >= SDLK_1 && k <= SDLK_4) {
+                } else if (k >= SDLK_1 && k < SDLK_1 + MODE_COUNT) {
+                    /* Index-bounded against MODE_COUNT so a future
+                     * change to the mode list can't write an out-of-
+                     * range value into g_app.mode (which feeds several
+                     * MODE_COUNT-sized lookup tables). */
                     g_app.mode = (EloadMode)(k - SDLK_1);
                 } else if (k == SDLK_UP) {
                     g_app.setpoint[g_app.mode] += setpoint_step(g_app.mode);
@@ -839,8 +859,24 @@ int main(int argc, char *argv[])
 
                     while (n--) {
                         char c = *t++;
+                        int accept = 0;
 
-                        if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+                        /* Allow digits anywhere; '-' only at position 0;
+                         * '.' only if not already present. Without this
+                         * filter a user could type "--..3.14" — strtod
+                         * stops at the first invalid char, so it would
+                         * still parse, but the visible buffer becomes
+                         * confusing. */
+                        if (c >= '0' && c <= '9') {
+                            accept = 1;
+                        } else if (c == '-' && g_app.edit_pos == 0) {
+                            accept = 1;
+                        } else if (c == '.' &&
+                                   memchr(g_app.edit_buf, '.',
+                                          (size_t)g_app.edit_pos) == NULL) {
+                            accept = 1;
+                        }
+                        if (accept) {
                             if ((size_t)g_app.edit_pos < cap) {
                                 g_app.edit_buf[g_app.edit_pos++] = c;
                                 g_app.edit_buf[g_app.edit_pos] = '\0';

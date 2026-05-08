@@ -13,6 +13,21 @@
  */
 FILE *nmcli_spawn_stdout(char *const argv[], pid_t *out_pid);
 
+/*
+ * Like nmcli_spawn_stdout, but also writes `stdin_data` (`stdin_len` bytes)
+ * to the child's stdin before returning the stdout FILE*. The child's
+ * stdin is closed after the write so the child sees EOF.
+ *
+ * Use this for argv-sensitive payloads (e.g. credentials) — passing them
+ * through stdin keeps them out of /proc/<pid>/cmdline. `stdin_len` MUST
+ * fit in the kernel pipe buffer (PIPE_BUF, typically 4 KiB) — larger
+ * payloads would deadlock the parent's write before the child has run.
+ * Returns NULL on failure (and reaps the child internally on partial
+ * setup failures).
+ */
+FILE *nmcli_spawn_stdin_stdout(char *const argv[], const void *stdin_data,
+                               size_t stdin_len, pid_t *out_pid);
+
 /* Waits for pid; returns child's exit code, or -1 on signal/error. */
 int nmcli_reap(pid_t pid);
 

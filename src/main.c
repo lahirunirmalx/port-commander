@@ -174,9 +174,25 @@ int main(int argc, char *argv[])
                     (size_t)ui.selected_visible < visible_count)
                     pid = visible[ui.selected_visible].pid;
                 if (pid > 0 && pid == ui.kill_confirm_pid) {
-                    if (kill((pid_t)pid, SIGTERM) != 0)
-                        fprintf(stderr, "kill(%d, SIGTERM): %s\n", pid,
-                                strerror(errno));
+                    /* Re-read the process's starttime and refuse the
+                     * kill if it no longer matches the value we
+                     * captured when the user armed the confirm. The
+                     * kernel reuses PID integers; without this check,
+                     * a long-open dialog could end up sending SIGTERM
+                     * to a different process that happened to inherit
+                     * the same PID — particularly bad under sudo. */
+                    unsigned long long st_now = proc_read_starttime(pid);
+
+                    if (ui.kill_confirm_starttime != 0 &&
+                        st_now == ui.kill_confirm_starttime) {
+                        if (kill((pid_t)pid, SIGTERM) != 0)
+                            fprintf(stderr, "kill(%d, SIGTERM): %s\n", pid,
+                                    strerror(errno));
+                    } else {
+                        fprintf(stderr,
+                                "kill: PID %d no longer refers to the "
+                                "process that was armed; refusing.\n", pid);
+                    }
                 }
                 ui.kill_confirm_pid = -1;
                 need_refresh = 1;

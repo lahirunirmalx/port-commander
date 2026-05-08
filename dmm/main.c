@@ -207,12 +207,12 @@ static void format_measurement(DmmMode m, double v, char *out, size_t outsz,
     case MODE_VDC:
     case MODE_VAC:
         unit = "V";
-        if (mag < 1.0) {
-            scale = 1000.0;
-            snprintf(prefix, sizeof(prefix), "m");
-        } else if (mag < 0.001) {
+        if (mag < 0.001) {
             scale = 1e6;
             snprintf(prefix, sizeof(prefix), "µ");
+        } else if (mag < 1.0) {
+            scale = 1000.0;
+            snprintf(prefix, sizeof(prefix), "m");
         }
         break;
     case MODE_ADC:
@@ -663,6 +663,14 @@ int main(int argc, char *argv[])
     if (!g_app.font_huge || !g_app.font_large || !g_app.font_med ||
         !g_app.font_small) {
         fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
+        if (g_app.font_huge)  TTF_CloseFont(g_app.font_huge);
+        if (g_app.font_large) TTF_CloseFont(g_app.font_large);
+        if (g_app.font_med)   TTF_CloseFont(g_app.font_med);
+        if (g_app.font_small) TTF_CloseFont(g_app.font_small);
+        SDL_DestroyRenderer(g_app.renderer);
+        SDL_DestroyWindow(g_app.window);
+        TTF_Quit();
+        SDL_Quit();
         return 1;
     }
 
