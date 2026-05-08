@@ -68,6 +68,23 @@ CompatProc *compat_spawn(const char *path, char *const argv[],
 int compat_path_lookup(const char *name, char *out, size_t outsz);
 
 /*
+ * Writes the user's home directory to `out` and returns 0 on success;
+ * returns -1 if no home dir can be determined (out is set to "").
+ *
+ * Tries $HOME first (POSIX); falls back to $USERPROFILE on Windows.
+ * Path separators in the output are platform-native.
+ */
+int compat_home_dir(char *out, size_t outsz);
+
+/*
+ * Searches a platform-specific list of common monospace font paths.
+ * Writes the first existing/readable candidate to `out` and returns 0;
+ * returns -1 (and out = "") if none was found. The dashboard uses this
+ * to pick a sensible default when the user hasn't supplied one.
+ */
+int compat_default_font(char *out, size_t outsz);
+
+/*
  * Polls the child without blocking.
  *   Returns 1 if the child has exited (and writes exit code via
  *     out_exit_code if non-NULL).

@@ -17,6 +17,9 @@
 #  include <sys/resource.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
+#  if defined(__linux__)
+#    include <sys/syscall.h>
+#  endif
 #endif
 
 const char *compat_exe_suffix(void)
@@ -161,25 +164,57 @@ CompatProc *compat_spawn(const char *path, char *const argv[],
             return NULL;
         }
         if (pid == 0) {
-            struct rlimit rl;
-            int max_fd;
-            int fd;
-
             /*
              * Close every inherited file descriptor above stderr before
              * execvp so the child doesn't hold the dashboard's X11 socket,
              * font mmaps, or anything else that would (a) leak resources
              * back into the child's address space, (b) keep those handles
              * alive past dashboard exit. The child only needs stdin/out/err.
+             *
+             * Prefer close_range(2) (Linux 5.9+) or closefrom(3) (glibc
+             * 2.34+, BSD, Solaris) — both are O(1). Fall back to a loop
+             * bounded by RLIMIT_NOFILE; under systemd-style high soft
+             * limits we keep iterating past 4096 so FDs opened during a
+             * long dashboard session aren't silently leaked into the
+             * child. Closing a descriptor we don't own is a defined
+             * no-op (EBADF), so a loop that runs "too far" is safe.
              */
-            if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
-                max_fd = (int)rl.rlim_cur;
-            else
-                max_fd = 1024;
-            if (max_fd > 4096)
-                max_fd = 4096;
-            for (fd = 3; fd < max_fd; fd++)
-                (void)close(fd);
+            int closed = 0;
+
+#if defined(__linux__) && defined(SYS_close_range)
+            if (syscall(SYS_close_range, 3, ~0U, 0) == 0)
+                closed = 1;
+#endif
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#  if __GLIBC_PREREQ(2, 34)
+            if (!closed) {
+                closefrom(3);
+                closed = 1;
+            }
+#  endif
+#endif
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+    defined(__sun) || defined(__APPLE__)
+            if (!closed) {
+                closefrom(3);
+                closed = 1;
+            }
+#endif
+            if (!closed) {
+                struct rlimit rl;
+                int max_fd;
+                int fd;
+
+                if (getrlimit(RLIMIT_NOFILE, &rl) == 0 &&
+                    rl.rlim_cur != RLIM_INFINITY)
+                    max_fd = (int)rl.rlim_cur;
+                else
+                    max_fd = 1024;
+                /* No artificial ceiling: a long-running dashboard with a
+                 * high soft limit would otherwise leak FDs above 4096. */
+                for (fd = 3; fd < max_fd; fd++)
+                    (void)close(fd);
+            }
 
             execvp(path, argv);
             _exit(127);
@@ -188,6 +223,65 @@ CompatProc *compat_spawn(const char *path, char *const argv[],
     }
 #endif
     return p;
+}
+
+int compat_home_dir(char *out, size_t outsz)
+{
+    const char *h;
+
+    if (!out || outsz == 0)
+        return -1;
+    out[0] = '\0';
+    h = getenv("HOME");
+    if (h && h[0]) {
+        snprintf(out, outsz, "%s", h);
+        return 0;
+    }
+#ifdef _WIN32
+    h = getenv("USERPROFILE");
+    if (h && h[0]) {
+        snprintf(out, outsz, "%s", h);
+        return 0;
+    }
+#endif
+    return -1;
+}
+
+int compat_default_font(char *out, size_t outsz)
+{
+    /* Common monospace font locations across the platforms we target.
+     * Order is: Linux (Debian/Ubuntu/Fedora layout) → macOS bundled
+     * fonts → Windows. The first existing/readable file wins. */
+    static const char *const candidates[] = {
+        /* Linux. */
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
+        "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+        "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+        /* macOS. */
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/Library/Fonts/Andale Mono.ttf",
+        /* Windows. */
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/lucon.ttf",
+        NULL,
+    };
+    int i;
+
+    if (!out || outsz == 0)
+        return -1;
+    out[0] = '\0';
+    for (i = 0; candidates[i]; i++) {
+        FILE *fp = fopen(candidates[i], "rb");
+        if (fp) {
+            fclose(fp);
+            snprintf(out, outsz, "%s", candidates[i]);
+            return 0;
+        }
+    }
+    return -1;
 }
 
 int compat_path_lookup(const char *name, char *out, size_t outsz)

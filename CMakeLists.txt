@@ -49,8 +49,14 @@ target_compile_options(apcompat PRIVATE ${SDL2_CFLAGS_OTHER})
 # -----------------------------------------------------------------------------
 add_executable(apcommander
     dash/main.c
+    dash/config.c
+    dash/menu.c
+    dash/render.c
+    dash/spawn_pool.c
+    dash/tile.c
 )
 target_include_directories(apcommander PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/dash
     ${SDL2_INCLUDE_DIRS}
     ${SDL2_TTF_INCLUDE_DIRS}
 )
